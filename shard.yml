@@ -1,0 +1,14 @@
+name: pnggif
+version: 0.1.0
+
+authors:
+  - Davor Ocelic <docelic@spinlocksolutions.com>
+
+crystal: ">= 1.0.0"
+
+license: AGPLv3
+
+description: |
+  Pure-Crystal PNG / APNG / GIF reader. Decodes images into RGBA bitmaps and
+  downscaled terminal-cell maps (with non-square-cell aspect correction).
+  Ported from Blessed's bundled tng.js.
