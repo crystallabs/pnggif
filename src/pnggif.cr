@@ -258,7 +258,7 @@ module PNGGIF
       compute_metrics
       return sample_interlaced_lines(data) if @interlace == 1
 
-      samples = [] of Int32
+      samples = Array(Int32).new(@width * @height * @sample_depth)
       prior = Bytes.new(@byte_width, 0u8)
       p = 0
       while p < data.size
@@ -266,7 +266,7 @@ module PNGGIF
         p += 1
         line = Bytes.new(@byte_width, 0u8)
         n = Math.min(@byte_width, data.size - p)
-        n.times { |k| line[k] = data[p + k] }
+        data[p, n].copy_to(line) if n > 0
         p += @byte_width
         unfilter_line filter, line, prior
         sample_line_into samples, line, @width
@@ -354,34 +354,36 @@ module PNGGIF
     end
 
     private def create_bitmap(samples : Array(Int32)) : Bitmap
-      pixels = [] of Pixel
+      rows = Bitmap.new
+      w = @width
+      return rows if w <= 0
+
       sd = @sample_depth
+      row = Array(Pixel).new(w)
       i = 0
       while i < samples.size
         case @color_type
         when 0
           v = sample_to_8bit samples[i]
-          pixels << Pixel.new(v, v, v, 255)
+          row << Pixel.new(v, v, v, 255)
         when 2
-          pixels << Pixel.new(sample_to_8bit(samples[i]), sample_to_8bit(samples[i + 1]), sample_to_8bit(samples[i + 2]), 255)
+          row << Pixel.new(sample_to_8bit(samples[i]), sample_to_8bit(samples[i + 1]), sample_to_8bit(samples[i + 2]), 255)
         when 3
           idx = samples[i]
-          pixels << (@palette[idx]? || Pixel.new(0, 0, 0, 0))
+          row << (@palette[idx]? || Pixel.new(0, 0, 0, 0))
         when 4
           v = sample_to_8bit samples[i]
-          pixels << Pixel.new(v, v, v, sample_to_8bit(samples[i + 1]))
+          row << Pixel.new(v, v, v, sample_to_8bit(samples[i + 1]))
         when 6
-          pixels << Pixel.new(sample_to_8bit(samples[i]), sample_to_8bit(samples[i + 1]), sample_to_8bit(samples[i + 2]), sample_to_8bit(samples[i + 3]))
+          row << Pixel.new(sample_to_8bit(samples[i]), sample_to_8bit(samples[i + 1]), sample_to_8bit(samples[i + 2]), sample_to_8bit(samples[i + 3]))
         end
         i += sd
+        if row.size == w
+          rows << row
+          row = Array(Pixel).new(w)
+        end
       end
-
-      rows = Bitmap.new
-      j = 0
-      while j < pixels.size
-        rows << pixels[j, Math.min(@width, pixels.size - j)]
-        j += @width
-      end
+      rows << row unless row.empty?
       rows
     end
 
@@ -406,7 +408,7 @@ module PNGGIF
           source += 1
           line = Bytes.new(row_size, 0u8)
           n = Math.min(row_size, raw.size - source)
-          n.times { |k| line[k] = raw[source + k] }
+          raw[source, n].copy_to(line) if n > 0
           source += row_size
           unfilter_line filter, line, recon
           recon = line
@@ -734,7 +736,7 @@ module PNGGIF
         while p < buf.size && buf[p] != 0x00
           bsize = buf[p].to_i
           p += 1
-          bsize.times { |k| data << buf[p + k] }
+          data.concat(buf[p, bsize])
           p += bsize
         end
         p += 1
@@ -784,7 +786,7 @@ module PNGGIF
       while p < buf.size && buf[p] != 0x00
         size = buf[p].to_i
         p += 1
-        size.times { |k| lzw << buf[p + k] }
+        lzw.concat(buf[p, size])
         p += size
       end
       p += 1 # block terminator
