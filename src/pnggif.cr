@@ -14,13 +14,56 @@ module PNGGIF
   VERSION = "0.1.0"
 
   # A single RGBA pixel. Channels are 0..255; `a` is opacity (255 = opaque).
+  #
+  # Channels are stored as `UInt8` (4 bytes/pixel instead of 4×`Int32` = 16) so
+  # that megapixel `Bitmap`s and the cellmap downscale / animation composite
+  # loops touch 4× less memory and stay cache-resident. The accessors keep the
+  # public `Int32` (0..255) contract: `px.r # => Int32` and `Pixel.new` still
+  # takes `Int32` args. Out-of-range values wrap (`to_u8!`); all internal
+  # producers already emit 0..255.
   struct Pixel
-    property r : Int32
-    property g : Int32
-    property b : Int32
-    property a : Int32
+    @r : UInt8
+    @g : UInt8
+    @b : UInt8
+    @a : UInt8
 
-    def initialize(@r : Int32, @g : Int32, @b : Int32, @a : Int32 = 255)
+    def initialize(r : Int32, g : Int32, b : Int32, a : Int32 = 255)
+      @r = r.to_u8!
+      @g = g.to_u8!
+      @b = b.to_u8!
+      @a = a.to_u8!
+    end
+
+    def r : Int32
+      @r.to_i
+    end
+
+    def g : Int32
+      @g.to_i
+    end
+
+    def b : Int32
+      @b.to_i
+    end
+
+    def a : Int32
+      @a.to_i
+    end
+
+    def r=(v : Int32)
+      @r = v.to_u8!
+    end
+
+    def g=(v : Int32)
+      @g = v.to_u8!
+    end
+
+    def b=(v : Int32)
+      @b = v.to_u8!
+    end
+
+    def a=(v : Int32)
+      @a = v.to_u8!
     end
   end
 
@@ -135,8 +178,7 @@ module PNGGIF
 
       # Parse the default image (IDAT) at the IHDR dimensions first; this is the
       # static representation used when animation is disabled.
-      samples = parse_lines idat
-      @bmp = create_bitmap samples
+      @bmp = decode_image idat
       @canvas_width = @width
       @canvas_height = @height
 
@@ -230,8 +272,7 @@ module PNGGIF
         @height = fc["height"]
         idat = inflate(rf[:fdat])
         next if idat.empty?
-        samples = parse_lines idat
-        bmp = create_bitmap samples
+        bmp = decode_image idat
         den = fc["delayDen"] == 0 ? 100 : fc["delayDen"]
         delay = (fc["delayNum"] / den * 1000).to_i
         frames << Frame.new(bmp, delay, fc["width"], fc["height"],
@@ -256,11 +297,20 @@ module PNGGIF
       @byte_width = (@width * (@bits_per_pixel / 8.0)).ceil.to_i
     end
 
-    private def parse_lines(data : Bytes) : Array(Int32)
+    # Decodes the IDAT/fdAT byte stream straight into a `Bitmap`. The
+    # non-interlaced path is fully fused: each unfiltered scanline is converted
+    # directly into a row of `Pixel`s, so the full-image `Array(Int32)` samples
+    # buffer (16 MB for a megapixel RGBA image) and the separate
+    # `parse_lines`+`create_bitmap` read pass are both gone. Adam7 interlacing
+    # genuinely needs random-access reassembly, so it keeps the
+    # `sample_interlaced_lines` → `create_bitmap` route.
+    private def decode_image(data : Bytes) : Bitmap
       compute_metrics
-      return sample_interlaced_lines(data) if @interlace == 1
+      return create_bitmap(sample_interlaced_lines(data)) if @interlace == 1
 
-      samples = Array(Int32).new(@width * @height * @sample_depth)
+      rows = Bitmap.new(@height > 0 ? @height : 0)
+      return rows if @width <= 0
+
       # Two reusable buffers swapped each scanline (this line / previous line)
       # instead of allocating a fresh Bytes per row.
       buf_a = Bytes.new(@byte_width, 0u8)
@@ -285,10 +335,103 @@ module PNGGIF
         end
         p += @byte_width
         unfilter_line filter, line, prior
-        sample_line_into samples, line, @width
+        rows << build_pixel_row(line)
         prior, line = line, prior
       end
-      samples
+      rows
+    end
+
+    # Reads one raw (unscaled) sample at logical sample-index *idx* from a
+    # decoded scanline, handling 8-bit, 16-bit (big-endian) and packed sub-byte
+    # (1/2/4-bit, MSB-first) depths. Callers apply `#sample_to_8bit` for colour
+    # channels; palette indices use the raw value directly.
+    private def raw_sample(line : Bytes, idx : Int32) : Int32
+      case @bit_depth
+      when 8
+        line[idx].to_i
+      when 16
+        (line[idx << 1].to_i << 8) | line[(idx << 1) + 1].to_i
+      else
+        b = @bit_depth
+        pos = idx * b
+        byte = line[pos >> 3].to_i
+        (byte >> (8 - b - (pos & 7))) & ((1 << b) - 1)
+      end
+    end
+
+    # Converts one unfiltered scanline into a row of `Pixel`s. Colour type and
+    # bit depth are constant for the image, so the common 8-bit case gets a
+    # tight branch reading bytes straight out of `line`; other depths fall back
+    # to `raw_sample` + `sample_to_8bit`. Palette indices (type 3) are used raw.
+    private def build_pixel_row(line : Bytes) : Array(Pixel)
+      w = @width
+      row = Array(Pixel).new(w)
+      eight = @bit_depth == 8
+
+      case @color_type
+      when 0 # grayscale
+        x = 0
+        while x < w
+          v = eight ? line[x].to_i : sample_to_8bit(raw_sample(line, x))
+          row << Pixel.new(v, v, v, 255)
+          x += 1
+        end
+      when 2 # RGB
+        if eight
+          i = 0
+          while i < w * 3
+            row << Pixel.new(line[i].to_i, line[i + 1].to_i, line[i + 2].to_i, 255)
+            i += 3
+          end
+        else
+          x = 0
+          while x < w
+            b = x * 3
+            row << Pixel.new(sample_to_8bit(raw_sample(line, b)), sample_to_8bit(raw_sample(line, b + 1)), sample_to_8bit(raw_sample(line, b + 2)), 255)
+            x += 1
+          end
+        end
+      when 3 # palette index (raw sample, never scaled)
+        x = 0
+        while x < w
+          idx = eight ? line[x].to_i : raw_sample(line, x)
+          row << (@palette[idx]? || Pixel.new(0, 0, 0, 0))
+          x += 1
+        end
+      when 4 # grayscale + alpha
+        if eight
+          i = 0
+          while i < w * 2
+            v = line[i].to_i
+            row << Pixel.new(v, v, v, line[i + 1].to_i)
+            i += 2
+          end
+        else
+          x = 0
+          while x < w
+            b = x * 2
+            v = sample_to_8bit(raw_sample(line, b))
+            row << Pixel.new(v, v, v, sample_to_8bit(raw_sample(line, b + 1)))
+            x += 1
+          end
+        end
+      when 6 # RGBA
+        if eight
+          i = 0
+          while i < w * 4
+            row << Pixel.new(line[i].to_i, line[i + 1].to_i, line[i + 2].to_i, line[i + 3].to_i)
+            i += 4
+          end
+        else
+          x = 0
+          while x < w
+            b = x * 4
+            row << Pixel.new(sample_to_8bit(raw_sample(line, b)), sample_to_8bit(raw_sample(line, b + 1)), sample_to_8bit(raw_sample(line, b + 2)), sample_to_8bit(raw_sample(line, b + 3)))
+            x += 1
+          end
+        end
+      end
+      row
     end
 
     # Reverses a PNG scanline filter in place. The filter type is constant for
@@ -861,7 +1004,7 @@ module PNGGIF
 
       img.delay = @gc_delay
       img.dispose_method = @gc_dispose
-      indices = lzw_decompress(lzw, code_size)
+      indices = lzw_decompress(lzw, code_size, img.width * img.height)
       build_gif_bitmap img, indices, table, @gc_transparent
       @images << img
 
@@ -873,38 +1016,64 @@ module PNGGIF
     end
 
     private def build_gif_bitmap(img, indices, table, transparent)
+      w = img.width
+      h = img.height
+
+      unless img.interlaced
+        # Non-interlaced indices arrive in row-major order, so write straight
+        # into the bitmap rows — no intermediate flat buffer or second pass.
+        bmp = Bitmap.new(h)
+        n = indices.size
+        k = 0
+        h.times do
+          line = Array(Pixel).new(w)
+          w.times do
+            if k < n
+              b = indices[k]
+              color = table[b]? || Pixel.new(0, 0, 0, 0)
+              color = Pixel.new(color.r, color.g, color.b, 0) if transparent >= 0 && b == transparent
+              line << color
+            else
+              line << Pixel.new(0, 0, 0, 0)
+            end
+            k += 1
+          end
+          bmp << line
+        end
+        img.bmp = bmp
+        return
+      end
+
+      # Interlaced: indices fill rows out of order, so reassemble via a flat
+      # sample buffer first, then pack into rows.
       interlacing = [{0, 8}, {4, 8}, {2, 4}, {1, 2}, {0, 0}]
-      # Place indices into a row-major sample buffer, honouring interlacing.
-      samples = Array(Pixel).new(img.width * img.height, Pixel.new(0, 0, 0, 0))
+      samples = Array(Pixel).new(w * h, Pixel.new(0, 0, 0, 0))
       row = 0
       col = 0
       ilp = 0
       indices.each do |b|
-        if pos = (row * img.width + col)
+        pos = row * w + col
+        if pos < samples.size
           color = table[b]? || Pixel.new(0, 0, 0, 0)
           color = Pixel.new(color.r, color.g, color.b, 0) if transparent >= 0 && b == transparent
-          samples[pos] = color if pos < samples.size
+          samples[pos] = color
         end
         col += 1
-        if col >= img.width
+        if col >= w
           col = 0
-          if img.interlaced
-            row += interlacing[ilp][1]
-            if row >= img.height && ilp < interlacing.size - 1
-              ilp += 1
-              row = interlacing[ilp][0]
-            end
-          else
-            row += 1
+          row += interlacing[ilp][1]
+          if row >= h && ilp < interlacing.size - 1
+            ilp += 1
+            row = interlacing[ilp][0]
           end
         end
       end
 
-      bmp = Bitmap.new
+      bmp = Bitmap.new(h)
       idx = 0
-      img.height.times do
-        line = [] of Pixel
-        img.width.times do
+      h.times do
+        line = Array(Pixel).new(w)
+        w.times do
           line << (samples[idx]? || Pixel.new(0, 0, 0, 0))
           idx += 1
         end
@@ -914,7 +1083,9 @@ module PNGGIF
     end
 
     # LZW decompression ported from tng.js / ka-cs-programs gif-reader (MIT).
-    private def lzw_decompress(input : Bytes, code_size : Int32) : Array(Int32)
+    # *expected* is the final index count (image `width*height`); presizing the
+    # output array avoids ~log2(N) reallocations + full copies as it fills.
+    private def lzw_decompress(input : Bytes, code_size : Int32, expected : Int32 = 0) : Array(Int32)
       bit_depth = code_size + 1
       cc = 1 << code_size
       eoi = cc + 1
@@ -925,7 +1096,7 @@ module PNGGIF
       buffer = 0
       nbuffer = 0
       p = 0
-      buf = [] of Int32
+      buf = expected > 0 ? Array(Int32).new(expected) : [] of Int32
       max_elem = 0
 
       loop do
