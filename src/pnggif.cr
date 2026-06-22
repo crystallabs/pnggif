@@ -184,7 +184,9 @@ module PNGGIF
             @palette[idx] = Pixel.new(old.r, old.g, old.b, alpha.to_i)
           end
         when "IDAT"
-          @idat << bytes_dup(data)
+          # `data` is a zero-copy view into `buf`, which stays alive for the whole
+          # decode; `inflate` copies it out, so no defensive dup is needed.
+          @idat << data
         when "acTL"
           @actl = {"numFrames" => u32(data, 0).to_i, "numPlays" => u32(data, 4).to_i}
           @num_plays = u32(data, 4).to_i
@@ -198,7 +200,7 @@ module PNGGIF
           end
         when "fdAT"
           # First 4 bytes are a sequence number; the rest is zlib data.
-          @raw_frames[-1][:fdat] << bytes_dup(data[4, data.size - 4])
+          @raw_frames[-1][:fdat] << data[4, data.size - 4]
         when "IEND"
           break
         end
@@ -259,40 +261,74 @@ module PNGGIF
       return sample_interlaced_lines(data) if @interlace == 1
 
       samples = Array(Int32).new(@width * @height * @sample_depth)
-      prior = Bytes.new(@byte_width, 0u8)
+      # Two reusable buffers swapped each scanline (this line / previous line)
+      # instead of allocating a fresh Bytes per row.
+      buf_a = Bytes.new(@byte_width, 0u8)
+      buf_b = Bytes.new(@byte_width, 0u8)
+      prior = buf_a
+      line = buf_b
       p = 0
       while p < data.size
         filter = data[p].to_i
         p += 1
-        line = Bytes.new(@byte_width, 0u8)
         n = Math.min(@byte_width, data.size - p)
         data[p, n].copy_to(line) if n > 0
+        # A full scanline fully overwrites `line`; only a short final line needs
+        # its stale tail (from a previous row) cleared to match fresh-buffer
+        # semantics.
+        if n < @byte_width
+          k = n < 0 ? 0 : n
+          while k < @byte_width
+            line[k] = 0u8
+            k += 1
+          end
+        end
         p += @byte_width
         unfilter_line filter, line, prior
         sample_line_into samples, line, @width
-        prior = line
+        prior, line = line, prior
       end
       samples
     end
 
+    # Reverses a PNG scanline filter in place. The filter type is constant for
+    # the whole line, so it is dispatched once here rather than per byte; each
+    # branch reads only the neighbours it needs. `prior` is always the same size
+    # as `line` (the caller allocates both at `@byte_width` / the interlace pass's
+    # row size), so the previous per-byte `< prior.size` guards were dead and are
+    # gone. Filter `a` (left) and `c` (upper-left) are zero for the first pixel.
     private def unfilter_line(filter : Int32, line : Bytes, prior : Bytes)
       return if filter == 0
       bpp = @bytes_per_pixel
-      x = 0
-      while x < line.size
-        a = x >= bpp ? line[x - bpp].to_i : 0
-        b = x < prior.size ? prior[x].to_i : 0
-        c = (x >= bpp && x - bpp < prior.size) ? prior[x - bpp].to_i : 0
-        cur = line[x].to_i
-        val = case filter
-              when 1 then cur + a
-              when 2 then cur + b
-              when 3 then cur + ((a + b) // 2)
-              when 4 then cur + paeth(a, b, c)
-              else        cur
-              end
-        line[x] = (val & 0xff).to_u8
-        x += 1
+      size = line.size
+      case filter
+      when 1 # Sub: predictor = a. First `bpp` bytes predict against 0 (unchanged).
+        x = bpp
+        while x < size
+          line[x] = ((line[x].to_i + line[x - bpp].to_i) & 0xff).to_u8
+          x += 1
+        end
+      when 2 # Up: predictor = b
+        x = 0
+        while x < size
+          line[x] = ((line[x].to_i + prior[x].to_i) & 0xff).to_u8
+          x += 1
+        end
+      when 3 # Average: predictor = (a + b) // 2
+        x = 0
+        while x < size
+          a = x >= bpp ? line[x - bpp].to_i : 0
+          line[x] = ((line[x].to_i + ((a + prior[x].to_i) // 2)) & 0xff).to_u8
+          x += 1
+        end
+      when 4 # Paeth
+        x = 0
+        while x < size
+          a = x >= bpp ? line[x - bpp].to_i : 0
+          c = x >= bpp ? prior[x - bpp].to_i : 0
+          line[x] = ((line[x].to_i + paeth(a, prior[x].to_i, c)) & 0xff).to_u8
+          x += 1
+        end
       end
     end
 
@@ -353,34 +389,61 @@ module PNGGIF
       end
     end
 
+    # Color type is constant for the image, so it is dispatched once here rather
+    # than per pixel. Each branch unpacks `@sample_depth` samples into one Pixel
+    # and flushes a row every `w` pixels; a trailing partial row (if any) is
+    # appended at the end, matching the original behaviour.
     private def create_bitmap(samples : Array(Int32)) : Bitmap
       rows = Bitmap.new
       w = @width
       return rows if w <= 0
 
       sd = @sample_depth
+      n = samples.size
       row = Array(Pixel).new(w)
       i = 0
-      while i < samples.size
-        case @color_type
-        when 0
+      case @color_type
+      when 0 # grayscale
+        while i < n
           v = sample_to_8bit samples[i]
           row << Pixel.new(v, v, v, 255)
-        when 2
+          i += sd
+          if row.size == w
+            rows << row; row = Array(Pixel).new(w)
+          end
+        end
+      when 2 # RGB
+        while i < n
           row << Pixel.new(sample_to_8bit(samples[i]), sample_to_8bit(samples[i + 1]), sample_to_8bit(samples[i + 2]), 255)
-        when 3
-          idx = samples[i]
-          row << (@palette[idx]? || Pixel.new(0, 0, 0, 0))
-        when 4
+          i += sd
+          if row.size == w
+            rows << row; row = Array(Pixel).new(w)
+          end
+        end
+      when 3 # palette index
+        while i < n
+          row << (@palette[samples[i]]? || Pixel.new(0, 0, 0, 0))
+          i += sd
+          if row.size == w
+            rows << row; row = Array(Pixel).new(w)
+          end
+        end
+      when 4 # grayscale + alpha
+        while i < n
           v = sample_to_8bit samples[i]
           row << Pixel.new(v, v, v, sample_to_8bit(samples[i + 1]))
-        when 6
-          row << Pixel.new(sample_to_8bit(samples[i]), sample_to_8bit(samples[i + 1]), sample_to_8bit(samples[i + 2]), sample_to_8bit(samples[i + 3]))
+          i += sd
+          if row.size == w
+            rows << row; row = Array(Pixel).new(w)
+          end
         end
-        i += sd
-        if row.size == w
-          rows << row
-          row = Array(Pixel).new(w)
+      when 6 # RGBA
+        while i < n
+          row << Pixel.new(sample_to_8bit(samples[i]), sample_to_8bit(samples[i + 1]), sample_to_8bit(samples[i + 2]), sample_to_8bit(samples[i + 3]))
+          i += sd
+          if row.size == w
+            rows << row; row = Array(Pixel).new(w)
+          end
         end
       end
       rows << row unless row.empty?
@@ -600,7 +663,7 @@ module PNGGIF
     # Converts a non-PNG/GIF buffer (JPEG, BMP, ...) to PNG via ImageMagick.
     private def to_png(input : Bytes) : Bytes
       stdout = IO::Memory.new
-      status = Process.run("convert", ["-:-", "png:-"], input: IO::Memory.new(input), output: stdout, error: Process::Redirect::Close)
+      status = Process.run("convert", ["-", "png:-"], input: IO::Memory.new(input), output: stdout, error: Process::Redirect::Close)
       raise "cannot decode image: ImageMagick `convert` failed or is not installed" unless status.success?
       stdout.to_slice
     rescue ex : File::NotFoundError | RuntimeError
@@ -623,12 +686,6 @@ module PNGGIF
     end
 
     # ------------------------------------------------------------- byte utils
-
-    private def bytes_dup(b : Bytes) : Bytes
-      dup = Bytes.new(b.size)
-      b.copy_to(dup)
-      dup
-    end
 
     private def u32(b : Bytes, i : Int32) : UInt32
       (b[i].to_u32 << 24) | (b[i + 1].to_u32 << 16) | (b[i + 2].to_u32 << 8) | b[i + 3].to_u32
@@ -732,14 +789,7 @@ module PNGGIF
         id = String.new(buf[p, 8])
         auth = String.new(buf[p + 8, 3])
         p += 11
-        data = [] of UInt8
-        while p < buf.size && buf[p] != 0x00
-          bsize = buf[p].to_i
-          p += 1
-          data.concat(buf[p, bsize])
-          p += bsize
-        end
-        p += 1
+        data, p = gather_subblocks(buf, p)
         # NETSCAPE2.0 / ANIMEXTS1.0 sub-block 1 carries the loop count.
         netscape = (id == "NETSCAPE" && auth == "2.0") || (id == "ANIMEXTS" && auth == "1.0")
         if netscape && data.size >= 3 && data[0] == 0x01
@@ -758,6 +808,31 @@ module PNGGIF
         p += size
       end
       p + 1
+    end
+
+    # Concatenates a chain of GIF sub-blocks (each a length byte followed by that
+    # many data bytes, terminated by a zero length) into a single `Bytes`.
+    # Returns the gathered data and the position just past the terminator. Two
+    # passes avoid the per-sub-block `Array(UInt8)#concat` growth and the
+    # `to_unsafe` round-trip the previous inline loops used.
+    private def gather_subblocks(buf : Bytes, p : Int32) : Tuple(Bytes, Int32)
+      total = 0
+      q = p
+      while q < buf.size && buf[q] != 0x00
+        size = buf[q].to_i
+        q += 1 + size
+        total += size
+      end
+      data = Bytes.new(total)
+      off = 0
+      while p < buf.size && buf[p] != 0x00
+        size = buf[p].to_i
+        p += 1
+        buf[p, size].copy_to(data + off) if size > 0
+        off += size
+        p += size
+      end
+      {data, p + 1}
     end
 
     private def parse_image(buf : Bytes, p : Int32) : Int32
@@ -782,18 +857,11 @@ module PNGGIF
       end
 
       code_size = buf[p].to_i; p += 1
-      lzw = [] of UInt8
-      while p < buf.size && buf[p] != 0x00
-        size = buf[p].to_i
-        p += 1
-        lzw.concat(buf[p, size])
-        p += size
-      end
-      p += 1 # block terminator
+      lzw, p = gather_subblocks(buf, p)
 
       img.delay = @gc_delay
       img.dispose_method = @gc_dispose
-      indices = lzw_decompress(Slice.new(lzw.to_unsafe, lzw.size), code_size)
+      indices = lzw_decompress(lzw, code_size)
       build_gif_bitmap img, indices, table, @gc_transparent
       @images << img
 
