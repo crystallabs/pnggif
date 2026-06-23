@@ -161,6 +161,43 @@ module PNGGIF
       end
     end
 
+    # Builds an animated `PNG` directly from already-decoded, full-canvas
+    # *frames* (`{bitmap, delay_ms}`) — e.g. video frames produced by an
+    # external decoder — bypassing all file parsing. Each frame is treated as a
+    # full, independent canvas image (`blend_op = source`, no disposal), so
+    # `#animation_cellmaps` and the usual playback path work unchanged.
+    # *num_plays* is the loop count (`0` = loop forever).
+    def self.from_frames(frames : Array(Tuple(Bitmap, Int32)),
+                         canvas_width : Int32, canvas_height : Int32,
+                         num_plays : Int32 = 0) : PNG
+      new frames, canvas_width, canvas_height, num_plays
+    end
+
+    # :nodoc:
+    # Frame-backed constructor used by `.from_frames`. The rendering knobs mirror
+    # the file constructor's so a consumer can tune the cellmap sampling.
+    def initialize(frames : Array(Tuple(Bitmap, Int32)),
+                   canvas_width : Int32, canvas_height : Int32,
+                   num_plays : Int32 = 0,
+                   @scale : Float64 = 1.0,
+                   @cell_width : Int32? = nil,
+                   @cell_height : Int32? = nil,
+                   @ascii : Bool = false,
+                   @speed : Float64 = 1.0,
+                   @cell_aspect : Float64 = 2.0)
+      raise "PNGGIF::PNG.from_frames: empty frame list" if frames.empty?
+      raise "PNGGIF::PNG.from_frames: non-positive canvas size" if canvas_width <= 0 || canvas_height <= 0
+      @width = @canvas_width = canvas_width
+      @height = @canvas_height = canvas_height
+      @num_plays = num_plays
+      fr = frames.map do |(bmp, delay)|
+        Frame.new(bmp, delay, canvas_width, canvas_height, 0, 0, 0, 0)
+      end
+      @bmp = fr.first.bmp
+      @frames = fr
+      @cellmap = create_cellmap bmp
+    end
+
     private def detect_format(buf : Bytes) : String
       return "png" if buf.size >= 4 && u32(buf, 0) == 0x89504e47
       return "gif" if buf.size >= 3 && buf[0] == 'G'.ord && buf[1] == 'I'.ord && buf[2] == 'F'.ord
