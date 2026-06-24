@@ -1,4 +1,5 @@
 require "compress/zlib"
+require "./encode"
 
 # Pure-Crystal PNG / APNG / GIF reader.
 #
