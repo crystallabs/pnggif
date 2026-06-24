@@ -714,13 +714,13 @@ module PNGGIF
       ys = height / cmheight
       xs = width / cmwidth
 
-      cellmap = Bitmap.new
+      cellmap = Bitmap.new(cmheight)
       y = 0.0
       while y < height
         yy = y.round.to_i
         row = bmp[yy]?
         break unless row
-        line = [] of Pixel
+        line = Array(Pixel).new(cmwidth)
         x = 0.0
         while x < width
           xx = x.round.to_i
@@ -777,12 +777,12 @@ module PNGGIF
         # Blit the frame onto the canvas (blend_op 0 = source, 1 = over).
         frame.height.times do |sy|
           fy = frame.y_offset + sy
-          next unless (0...@canvas_height).includes?(fy)
+          next unless fy >= 0 && fy < @canvas_height
           frow = frame.bmp[sy]?
           next unless frow
           frame.width.times do |sx|
             fx = frame.x_offset + sx
-            next unless (0...@canvas_width).includes?(fx)
+            next unless fx >= 0 && fx < @canvas_width
             px = frow[sx]?
             next unless px
             if frame.blend_op == 0 || px.a != 0
@@ -802,10 +802,10 @@ module PNGGIF
     private def each_rect(frame : Frame, &)
       frame.height.times do |sy|
         y = frame.y_offset + sy
-        next unless (0...@canvas_height).includes?(y)
+        next unless y >= 0 && y < @canvas_height
         frame.width.times do |sx|
           x = frame.x_offset + sx
-          next unless (0...@canvas_width).includes?(x)
+          next unless x >= 0 && x < @canvas_width
           yield x, y
         end
       end
@@ -854,6 +854,12 @@ module PNGGIF
 
     private def inflate(buffers : Array(Bytes)) : Bytes
       return Bytes.empty if buffers.empty?
+      # Single chunk (small PNGs, per-frame fdAT): `IO::Memory` wraps the slice
+      # without copying, so skip allocating + filling the `combined` buffer.
+      if buffers.size == 1
+        io = IO::Memory.new(buffers[0])
+        return Compress::Zlib::Reader.open(io, &.getb_to_end)
+      end
       total = buffers.sum(&.size)
       combined = Bytes.new(total)
       off = 0
