@@ -1,0 +1,23 @@
+# Ameba configuration for pnggif.
+# Run with: ./bin/ameba
+#
+# Most defaults are kept. The exceptions below are deliberate: they reflect the
+# nature of an image codec (inherently branchy decode loops, short coordinate
+# names that mirror the file-format spec).
+
+Metrics/CyclomaticComplexity:
+  # PNG scanline filtering, GIF LZW decoding and frame compositing are single,
+  # cohesive algorithms. Splitting them to satisfy a complexity threshold would
+  # hurt readability and add call overhead on the decode hot path. Disabled
+  # rather than threshold-tuned because the highest method sits right at the cap,
+  # where any small edit would re-trip an accepted finding.
+  Enabled: false
+
+Naming/BlockParameterName:
+  # The decoders use short names that mirror the pixel/byte/format vocabulary
+  # of the original tng.js port: sx/sy (source x/y), jj (interlace-pass index),
+  # f (flat sample), b (byte), rf (raw frame), zw (zlib writer). Disabled rather
+  # than maintaining an allowlist that every new short name would have to be
+  # added to.
+  Enabled: false
+

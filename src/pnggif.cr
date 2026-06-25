@@ -132,7 +132,7 @@ module PNGGIF
     property scale : Float64
     property cell_width : Int32?
     property cell_height : Int32?
-    property ascii : Bool
+    property? ascii : Bool
     property speed : Float64
     # Terminal cell height-to-width ratio, used to correct aspect when only one
     # of `cell_width`/`cell_height` is fixed (or when scaling). ~2.0 for typical
@@ -744,7 +744,7 @@ module PNGGIF
     # `renderFrame` / `compileFrames`.
     def animation_cellmaps(cmwidth : Int32? = @cell_width, cmheight : Int32? = @cell_height, scale : Float64 = @scale) : Array(Tuple(Bitmap, Int32))?
       fr = @frames
-      return nil unless fr && !fr.empty?
+      return nil if fr.nil? || fr.empty?
 
       canvas = Array.new(@canvas_height) { Array.new(@canvas_width) { Pixel.new(0, 0, 0, 0) } }
       result = [] of Tuple(Bitmap, Int32)
@@ -893,7 +893,7 @@ module PNGGIF
       property top = 0
       property width = 0
       property height = 0
-      property interlaced = false
+      property? interlaced = false
       property delay = 0
       property dispose_method = 0
       property bmp : Bitmap = Bitmap.new
@@ -1063,7 +1063,7 @@ module PNGGIF
       w = img.width
       h = img.height
 
-      unless img.interlaced
+      unless img.interlaced?
         # Non-interlaced indices arrive in row-major order, so write straight
         # into the bitmap rows — no intermediate flat buffer or second pass.
         bmp = Bitmap.new(h)

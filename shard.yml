@@ -8,6 +8,11 @@ crystal: ">= 1.0.0"
 
 license: AGPLv3
 
+development_dependencies:
+  ameba:
+    github: crystal-ameba/ameba
+    version: ~> 1.6.0
+
 description: |
   Pure-Crystal PNG / APNG / GIF reader. Decodes images into RGBA bitmaps and
   downscaled terminal-cell maps (with non-square-cell aspect correction).
