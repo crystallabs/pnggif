@@ -307,8 +307,14 @@ module PNGGIF
             @raw_frames << {fctl: fctl, fdat: [] of Bytes, idat: false}
           end
         when "fdAT"
-          # First 4 bytes are a sequence number; the rest is zlib data.
-          @raw_frames[-1][:fdat] << data[4, data.size - 4]
+          # First 4 bytes are a sequence number; the rest is zlib data. Skip
+          # (don't crash on) a corrupt/misordered stream: an fdAT before any
+          # fcTL would index an empty `@raw_frames`, and one shorter than its
+          # 4-byte sequence number would slice with a negative count — both
+          # mirror the chunk-length truncation guard above.
+          if !@raw_frames.empty? && n >= 4
+            @raw_frames[-1][:fdat] << data[4, n - 4]
+          end
         when "IEND"
           break
         end
