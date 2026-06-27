@@ -1120,6 +1120,11 @@ module PNGGIF
       if lct
         table = [] of Pixel
         total = 1 << lctsize
+        # A truncated file may declare a local color table (up to 256×3 bytes)
+        # that runs past the buffer, mirroring the global color table guard in
+        # the constructor; without this the `buf[p]` reads below raise a raw
+        # IndexError instead of a clean decode error.
+        raise "bad gif image: truncated local color table" unless p + total * 3 <= buf.size
         total.times do
           table << Pixel.new(buf[p].to_i, buf[p + 1].to_i, buf[p + 2].to_i, 255)
           p += 3
