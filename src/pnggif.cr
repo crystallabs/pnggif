@@ -120,6 +120,11 @@ module PNGGIF
     @filter = 0
     @interlace = 0
     @palette = [] of Pixel
+    # Color-key transparency from a `tRNS` chunk on a grayscale (type 0) or
+    # truecolor (type 2) image: the (scaled, 8-bit) RGB whose pixels are
+    # transparent. `nil` when absent; palette transparency (type 3) is folded
+    # into `@palette` instead.
+    @trns : Tuple(Int32, Int32, Int32)? = nil
     @sample_depth = 1
     @bits_per_pixel = 8
     @bytes_per_pixel = 1
@@ -232,13 +237,18 @@ module PNGGIF
     private def parse_chunks(buf : Bytes)
       i = 8
       while i + 8 <= buf.size
-        len = u32(buf, i).to_i
+        len = u32(buf, i)
         i += 4
         name = String.new(buf[i, 4])
         i += 4
-        break if i + len > buf.size
-        data = buf[i, len]
-        i += len
+        # Stop (don't crash) on a truncated/corrupt chunk whose length overruns
+        # the buffer. Comparing as UInt32 also avoids `to_i` overflowing on a
+        # length with the high bit set, which would otherwise raise before this
+        # guard could fire.
+        break if len > (buf.size - i).to_u32
+        n = len.to_i
+        data = buf[i, n]
+        i += n
         i += 4 # skip CRC
 
         case name
@@ -257,11 +267,29 @@ module PNGGIF
             p += 3
           end
         when "tRNS"
-          # Palette transparency: assign alpha to existing palette entries.
-          data.each_with_index do |alpha, idx|
-            break if idx >= @palette.size
-            old = @palette[idx]
-            @palette[idx] = Pixel.new(old.r, old.g, old.b, alpha.to_i)
+          # IHDR (and PLTE) always precede tRNS, so `@color_type`/`@bit_depth`
+          # and the palette are already set here.
+          case @color_type
+          when 3
+            # Palette transparency: assign alpha to existing palette entries.
+            data.each_with_index do |alpha, idx|
+              break if idx >= @palette.size
+              old = @palette[idx]
+              @palette[idx] = Pixel.new(old.r, old.g, old.b, alpha.to_i)
+            end
+          when 0
+            # Grayscale color key: a single 2-byte gray sample (bit-depth range).
+            if data.size >= 2
+              g = sample_to_8bit(u16(data, 0).to_i)
+              @trns = {g, g, g}
+            end
+          when 2
+            # Truecolor color key: three 2-byte R/G/B samples (bit-depth range).
+            if data.size >= 6
+              @trns = {sample_to_8bit(u16(data, 0).to_i),
+                       sample_to_8bit(u16(data, 2).to_i),
+                       sample_to_8bit(u16(data, 4).to_i)}
+            end
           end
         when "IDAT"
           # `data` is a zero-copy view into `buf`, which stays alive for the whole
@@ -344,7 +372,11 @@ module PNGGIF
     # `sample_interlaced_lines` → `create_bitmap` route.
     private def decode_image(data : Bytes) : Bitmap
       compute_metrics
-      return create_bitmap(sample_interlaced_lines(data)) if @interlace == 1
+      if @interlace == 1
+        bmp = create_bitmap(sample_interlaced_lines(data))
+        apply_color_trns bmp if @trns
+        return bmp
+      end
 
       rows = Bitmap.new(@height > 0 ? @height : 0)
       return rows if @width <= 0
@@ -376,7 +408,26 @@ module PNGGIF
         rows << build_pixel_row(line)
         prior, line = line, prior
       end
+      apply_color_trns rows if @trns
       rows
+    end
+
+    # Applies grayscale/truecolor `tRNS` color-key transparency: every pixel
+    # whose (8-bit) RGB equals the keyed color has its alpha cleared to 0. Runs
+    # only when `@trns` is set (rare), so the per-pixel decode hot paths stay
+    # untouched.
+    private def apply_color_trns(bmp : Bitmap)
+      t = @trns
+      return unless t
+      tr, tg, tb = t
+      bmp.each do |row|
+        x = 0
+        while x < row.size
+          px = row[x]
+          row[x] = Pixel.new(px.r, px.g, px.b, 0) if px.r == tr && px.g == tg && px.b == tb
+          x += 1
+        end
+      end
     end
 
     # Reads one raw (unscaled) sample at logical sample-index *idx* from a
@@ -717,17 +768,20 @@ module PNGGIF
 
       cellmap = Bitmap.new(cmheight)
       y = 0.0
-      while y < height
+      # Emit exactly cmheight × cmwidth cells. The sample positions still step by
+      # `ys`/`xs`, but the index is clamped to the last valid row/column instead
+      # of breaking: when upscaling (cm* larger than the source), the final step
+      # rounds to `height`/`width`, which previously dropped the last row/column.
+      cmheight.times do
         yy = y.round.to_i
-        row = bmp[yy]?
-        break unless row
+        yy = height - 1 if yy >= height
+        row = bmp[yy]? || break
         line = Array(Pixel).new(cmwidth)
         x = 0.0
-        while x < width
+        cmwidth.times do
           xx = x.round.to_i
-          px = row[xx]?
-          break unless px
-          line << px
+          xx = width - 1 if xx >= width
+          line << (row[xx]? || Pixel.new(0, 0, 0, 0))
           x += xs
         end
         cellmap << line
@@ -765,12 +819,20 @@ module PNGGIF
         end
 
         # Snapshot this frame's region if it will need restoring afterwards.
+        # Frames may extend past the canvas (common in real-world GIFs), so
+        # clamp like the blit loop below; out-of-bounds cells store transparent
+        # and are never read back (the restore via `each_rect` is also clamped).
         snapshot = nil
         if frame.dispose_op == 2
           snapshot = Bitmap.new
           frame.height.times do |sy|
+            cy = frame.y_offset + sy
+            crow = (cy >= 0 && cy < @canvas_height) ? canvas[cy] : nil
             row = Array(Pixel).new(frame.width)
-            frame.width.times { |sx| row << canvas[frame.y_offset + sy][frame.x_offset + sx] }
+            frame.width.times do |sx|
+              cx = frame.x_offset + sx
+              row << ((crow && cx >= 0 && cx < @canvas_width) ? crow[cx] : Pixel.new(0, 0, 0, 0))
+            end
             snapshot << row
           end
         end
@@ -915,6 +977,10 @@ module PNGGIF
     @gc_transparent = -1
 
     def initialize(buf : Bytes)
+      # The 6-byte signature + 7-byte logical screen descriptor must be present
+      # before any of them is read; guard up front (like the PNG header check)
+      # so a truncated buffer raises a clean error instead of an IndexError.
+      raise "bad gif header: truncated" unless buf.size >= 13
       sig = String.new(buf[0, 6])
       raise "bad gif header: #{sig}" unless sig == "GIF87a" || sig == "GIF89a"
 
@@ -1007,16 +1073,22 @@ module PNGGIF
       q = p
       while q < buf.size && buf[q] != 0x00
         size = buf[q].to_i
+        # A truncated trailing sub-block may claim more bytes than remain; count
+        # (and below, copy) only what is actually present so `buf[...]` can't run
+        # off the end, mirroring the PNG parser's truncation guard.
+        total += Math.min(size, buf.size - q - 1)
         q += 1 + size
-        total += size
       end
       data = Bytes.new(total)
       off = 0
       while p < buf.size && buf[p] != 0x00
         size = buf[p].to_i
         p += 1
-        buf[p, size].copy_to(data + off) if size > 0
-        off += size
+        n = Math.min(size, buf.size - p)
+        if n > 0
+          buf[p, n].copy_to(data + off)
+          off += n
+        end
         p += size
       end
       {data, p + 1}
