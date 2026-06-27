@@ -60,8 +60,11 @@ module PNGGIF
     seq = 0_u32
     frames.each_with_index do |(bmp, delay), i|
       fw, fh = bitmap_dimensions bmp
-      if fw > w || fh > h
-        raise ArgumentError.new("encode_apng: frame #{i} (#{fw}x#{fh}) exceeds canvas #{w}x#{h}")
+      # All frames share the canvas size: they are encoded at offset 0,0 with
+      # dispose NONE / blend SOURCE (full-frame replace), so an undersized frame
+      # would leave the previous frame's pixels showing in the uncovered region.
+      if fw != w || fh != h
+        raise ArgumentError.new("encode_apng: frame #{i} (#{fw}x#{fh}) does not match canvas #{w}x#{h}")
       end
       write_chunk io, "fcTL", fctl(seq, fw, fh, delay)
       seq += 1
