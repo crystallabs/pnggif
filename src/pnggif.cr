@@ -1000,6 +1000,11 @@ module PNGGIF
 
       if gct
         total = 1 << gctsize
+        # A truncated file may declare a global color table (up to 256×3 bytes)
+        # that runs past the buffer. Guard it like the 13-byte header check
+        # above so a short file raises a clean error instead of the IndexError
+        # that the unbounded `buf[p]` reads below would otherwise produce.
+        raise "bad gif header: truncated global color table" unless p + total * 3 <= buf.size
         total.times do
           @colors << Pixel.new(buf[p].to_i, buf[p + 1].to_i, buf[p + 2].to_i, 255)
           p += 3
