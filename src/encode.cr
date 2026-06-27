@@ -60,6 +60,9 @@ module PNGGIF
     seq = 0_u32
     frames.each_with_index do |(bmp, delay), i|
       fw, fh = bitmap_dimensions bmp
+      if fw > w || fh > h
+        raise ArgumentError.new("encode_apng: frame #{i} (#{fw}x#{fh}) exceeds canvas #{w}x#{h}")
+      end
       write_chunk io, "fcTL", fctl(seq, fw, fh, delay)
       seq += 1
 
@@ -114,7 +117,7 @@ module PNGGIF
     m.write_bytes h.to_u32, IO::ByteFormat::BigEndian
     m.write_bytes 0_u32, IO::ByteFormat::BigEndian                                # x_offset
     m.write_bytes 0_u32, IO::ByteFormat::BigEndian                                # y_offset
-    m.write_bytes (delay_ms < 0 ? 0 : delay_ms).to_u16, IO::ByteFormat::BigEndian # delay_num (ms)
+    m.write_bytes delay_ms.clamp(0, UInt16::MAX).to_u16, IO::ByteFormat::BigEndian # delay_num (ms)
     m.write_bytes 1000_u16, IO::ByteFormat::BigEndian                             # delay_den
     m.write_byte 0u8                                                              # dispose_op: NONE
     m.write_byte 0u8                                                              # blend_op: SOURCE (overwrite)
