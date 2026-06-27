@@ -51,7 +51,12 @@ module PNGGIF
     write_signature io
     write_ihdr io, w, h
 
-    # acTL: animation control (frame count + loop count).
+    # acTL: animation control (frame count + loop count). A negative loop count
+    # is meaningless: written verbatim it would two's-complement-wrap into a huge
+    # *finite* count (e.g. -1 -> 4_294_967_295) rather than the infinite loop a
+    # caller passing -1 almost certainly intends. APNG already spells "infinite"
+    # as 0, so fold any negative value to 0.
+    num_plays = 0 if num_plays < 0
     actl = IO::Memory.new
     actl.write_bytes frames.size.to_u32, IO::ByteFormat::BigEndian
     actl.write_bytes num_plays.to_u32, IO::ByteFormat::BigEndian
