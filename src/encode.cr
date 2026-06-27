@@ -120,8 +120,19 @@ module PNGGIF
     m.write_bytes h.to_u32, IO::ByteFormat::BigEndian
     m.write_bytes 0_u32, IO::ByteFormat::BigEndian                                # x_offset
     m.write_bytes 0_u32, IO::ByteFormat::BigEndian                                # y_offset
-    m.write_bytes delay_ms.clamp(0, UInt16::MAX).to_u16, IO::ByteFormat::BigEndian # delay_num (ms)
-    m.write_bytes 1000_u16, IO::ByteFormat::BigEndian                             # delay_den
+    # delay = delay_num/delay_den seconds, both uint16. With millisecond units
+    # (den 1000) delay_num only reaches 65_535 ms (~65 s), so simply clamping it
+    # would silently *misreport* any longer frame delay. Drop to centisecond
+    # units (den 100) past that point, which still round-trips the value while
+    # extending the range to ~655 s.
+    delay_ms = 0 if delay_ms < 0
+    if delay_ms <= UInt16::MAX
+      delay_num, delay_den = delay_ms.to_u16, 1000_u16
+    else
+      delay_num, delay_den = (delay_ms // 10).clamp(0, UInt16::MAX.to_i).to_u16, 100_u16
+    end
+    m.write_bytes delay_num, IO::ByteFormat::BigEndian                           # delay_num
+    m.write_bytes delay_den, IO::ByteFormat::BigEndian                           # delay_den
     m.write_byte 0u8                                                              # dispose_op: NONE
     m.write_byte 0u8                                                              # blend_op: SOURCE (overwrite)
     m.to_slice
