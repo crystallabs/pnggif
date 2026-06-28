@@ -1396,6 +1396,19 @@ module PNGGIF
       table
     end
 
+    # Pushes the byte string for dictionary entry *code* onto *stack* by walking
+    # the entry's prev-pointer chain back to its root literal. The chain yields
+    # the bytes in reverse, so the caller pops them off `stack` to emit forward
+    # order. Shared by `lzw_decompress`'s two emit branches (the in-table code
+    # and the KwKwK case), whose walk is otherwise byte-for-byte identical.
+    private def lzw_push_string(stack : Array(Int32), table : Array(Tuple(Int32, Int32, Int32)), code : Int32)
+      i = code
+      while i >= 0
+        stack << table[i][0]
+        i = table[i][1]
+      end
+    end
+
     # LZW decompression ported from tng.js / ka-cs-programs gif-reader (MIT).
     # *expected* is the final index count (image `width*height`); presizing the
     # output array avoids ~log2(N) reallocations + full copies as it fills.
@@ -1463,11 +1476,7 @@ module PNGGIF
           end
 
           if code < ntable
-            i = code
-            while i >= 0
-              stack << table[i][0]
-              i = table[i][1]
-            end
+            lzw_push_string(stack, table, code)
             table << {table[code][2], old_code, table[old_code][2]}
             ntable += 1
           else
@@ -1480,11 +1489,7 @@ module PNGGIF
             k = table[old_code][2]
             table << {k, old_code, k}
             ntable += 1
-            i = code
-            while i >= 0
-              stack << table[i][0]
-              i = table[i][1]
-            end
+            lzw_push_string(stack, table, code)
           end
 
           old_code = code
