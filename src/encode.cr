@@ -18,9 +18,7 @@ module PNGGIF
 
   # Encodes *bmp* as a still PNG and returns the file bytes.
   def self.encode_png(bmp : Bitmap) : Bytes
-    io = IO::Memory.new
-    encode_png bmp, io
-    io.to_slice
+    encode_to_bytes { |io| encode_png bmp, io }
   end
 
   # Encodes *bmp* as a still PNG, writing the file bytes to *io*.
@@ -37,9 +35,7 @@ module PNGGIF
   # frame doubles as the still `IDAT` (so non-APNG viewers show it). All frames
   # must share the canvas size of the first frame.
   def self.encode_apng(frames : Array(Tuple(Bitmap, Int32)), num_plays : Int32 = 0) : Bytes
-    io = IO::Memory.new
-    encode_apng frames, io, num_plays
-    io.to_slice
+    encode_to_bytes { |io| encode_apng frames, io, num_plays }
   end
 
   # :ditto:
@@ -92,6 +88,16 @@ module PNGGIF
   end
 
   # ---- internals -----------------------------------------------------------
+
+  # Runs *block* against a fresh in-memory IO and returns everything it wrote as
+  # a byte slice — the `IO::Memory.new` / `to_slice` bookend shared by the two
+  # public `encode_*(…) : Bytes` overloads, which only differ in which `(…, io)`
+  # twin they frame.
+  private def self.encode_to_bytes(& : IO ->) : Bytes
+    io = IO::Memory.new
+    yield io
+    io.to_slice
+  end
 
   private def self.bitmap_dimensions(bmp : Bitmap) : Tuple(Int32, Int32)
     h = bmp.size
