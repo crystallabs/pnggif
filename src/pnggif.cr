@@ -1065,9 +1065,17 @@ module PNGGIF
     end
 
     private def parse_extension(buf : Bytes, p : Int32) : Int32
+      # The extension label and each fixed-size header below are read
+      # unconditionally; guard them like the image-descriptor / color-table
+      # checks elsewhere so a file truncated inside an extension raises a clean
+      # decode error instead of a raw IndexError. (`skip_subblocks` /
+      # `gather_subblocks` already self-guard their variable-length tails.)
+      raise "bad gif: truncated extension" unless p < buf.size
       label = buf[p]
       p += 1
       if label == 0xf9 # graphic control
+        # block-size(1) + fields(1) + delay(2) + transparent-index(1) = 5 bytes.
+        raise "bad gif: truncated graphic-control extension" unless p + 5 <= buf.size
         p += 1         # block size (always 4)
         fields = buf[p].to_i
         @gc_dispose = (fields >> 2) & 0x07
@@ -1080,6 +1088,8 @@ module PNGGIF
         @gc_transparent = use_transparent ? tc : -1
         p = skip_subblocks(buf, p)
       elsif label == 0xff # application extension (NETSCAPE loop count)
+        # block-size(1) + 8-byte id + 3-byte auth code = 12 bytes.
+        raise "bad gif: truncated application extension" unless p + 12 <= buf.size
         p += 1            # block size (always 11)
         id = String.new(buf[p, 8])
         auth = String.new(buf[p + 8, 3])
