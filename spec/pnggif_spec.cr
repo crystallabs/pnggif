@@ -65,6 +65,32 @@ describe PNGGIF::PNG do
     it "treats a single-frame GIF as static (no animation frames)" do
       PNGGIF::PNG.new(TRANSPARENT_GIF).frames.should be_nil
     end
+
+    it "raises a clean error (not IndexError) for a GIF truncated at the image separator" do
+      # Valid 13-byte header (no global color table) + an image-separator byte,
+      # then nothing: the fixed image descriptor that follows is cut off.
+      truncated = Bytes[
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, # "GIF89a"
+        0x01, 0x00, 0x01, 0x00,             # 1x1 logical screen
+        0x00, 0x00, 0x00,                   # no GCT, bg index, aspect
+        0x2c,                               # image separator, then truncated
+      ]
+      expect_raises(Exception, /truncated/) do
+        PNGGIF::PNG.new(truncated)
+      end
+    end
+  end
+
+  describe "APNG frame delays" do
+    it "round-trips a canonical num/den delay without truncation" do
+      # 1001/1000 s = 1001 ms. The encoder writes delay_num=1001, delay_den=1000;
+      # the old float decode `(1001 / 1000 * 1000).to_i` floored to 1000 ms.
+      bytes = PNGGIF.encode_apng([{solid_bitmap(2, 2, 1, 2, 3), 1001}])
+      png = PNGGIF::PNG.new(bytes)
+      frames = png.frames
+      frames.should_not be_nil
+      frames.not_nil!.first.delay.should eq 1001
+    end
   end
 
   describe "#cellmap" do

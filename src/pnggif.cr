@@ -346,7 +346,12 @@ module PNGGIF
         next if idat.empty?
         bmp = decode_image idat
         den = fc["delayDen"] == 0 ? 100 : fc["delayDen"]
-        delay = (fc["delayNum"] / den * 1000).to_i
+        # Integer math: the delay is delayNum/delayDen seconds in milliseconds.
+        # The old `(delayNum / den * 1000).to_i` did float division then
+        # truncated, so spec-correct values such as 1001/1000 s read back as
+        # 1000 ms instead of 1001 (floor of 1000.999…). delayNum ≤ 65535, so
+        # delayNum*1000 stays well within Int32.
+        delay = (fc["delayNum"].to_i64 * 1000 // den).to_i32
         frames << Frame.new(bmp, delay, fc["width"], fc["height"],
           fc["xOffset"], fc["yOffset"], fc["disposeOp"], fc["blendOp"])
       end
@@ -1107,6 +1112,11 @@ module PNGGIF
 
     private def parse_image(buf : Bytes, p : Int32) : Int32
       img = Image.new
+      # The 9-byte image descriptor (offsets, size, flags) is read
+      # unconditionally below; guard it like the global/local color-table checks
+      # so a file truncated at/after the `0x2c` separator raises a clean decode
+      # error instead of a raw IndexError from the `u16`/`buf[p]` reads.
+      raise "bad gif image: truncated image descriptor" unless p + 9 <= buf.size
       img.left = u16(buf, p).to_i; p += 2
       img.top = u16(buf, p).to_i; p += 2
       img.width = u16(buf, p).to_i; p += 2
@@ -1131,6 +1141,10 @@ module PNGGIF
         end
       end
 
+      # The LZW minimum-code-size byte follows the (optional) local color table;
+      # guard it too, since a file truncated exactly here would otherwise read
+      # one byte past the end.
+      raise "bad gif image: truncated image data" unless p < buf.size
       code_size = buf[p].to_i; p += 1
       lzw, p = gather_subblocks(buf, p)
 
