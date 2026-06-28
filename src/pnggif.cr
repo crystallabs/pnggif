@@ -1312,6 +1312,25 @@ module PNGGIF
       color
     end
 
+    # Packs a flat, row-major pixel sequence into a `Bitmap` of *h* rows × *w*
+    # columns, yielding each cell's flat index `0...(w*h)` and storing the
+    # `Pixel` the block returns. Shared by the non-interlaced and (post-
+    # reassembly) interlaced GIF bitmap builders, whose row-packing loops are
+    # otherwise identical.
+    private def pack_pixel_rows(w : Int32, h : Int32, &) : Bitmap
+      bmp = Bitmap.new(h)
+      k = 0
+      h.times do
+        line = Array(Pixel).new(w)
+        w.times do
+          line << yield k
+          k += 1
+        end
+        bmp << line
+      end
+      bmp
+    end
+
     private def build_gif_bitmap(img, indices, table, transparent)
       w = img.width
       h = img.height
@@ -1319,22 +1338,10 @@ module PNGGIF
       unless img.interlaced?
         # Non-interlaced indices arrive in row-major order, so write straight
         # into the bitmap rows — no intermediate flat buffer or second pass.
-        bmp = Bitmap.new(h)
         n = indices.size
-        k = 0
-        h.times do
-          line = Array(Pixel).new(w)
-          w.times do
-            if k < n
-              line << gif_color(table, indices[k], transparent)
-            else
-              line << Pixel.new(0, 0, 0, 0)
-            end
-            k += 1
-          end
-          bmp << line
+        img.bmp = pack_pixel_rows(w, h) do |k|
+          k < n ? gif_color(table, indices[k], transparent) : Pixel.new(0, 0, 0, 0)
         end
-        img.bmp = bmp
         return
       end
 
@@ -1369,17 +1376,7 @@ module PNGGIF
         end
       end
 
-      bmp = Bitmap.new(h)
-      idx = 0
-      h.times do
-        line = Array(Pixel).new(w)
-        w.times do
-          line << (samples[idx]? || Pixel.new(0, 0, 0, 0))
-          idx += 1
-        end
-        bmp << line
-      end
-      img.bmp = bmp
+      img.bmp = pack_pixel_rows(w, h) { |idx| samples[idx]? || Pixel.new(0, 0, 0, 0) }
     end
 
     # Builds the LZW dictionary in its initial / post-Clear state: `cc` literal
