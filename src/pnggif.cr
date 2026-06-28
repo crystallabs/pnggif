@@ -903,7 +903,33 @@ module PNGGIF
         frames << Frame.new(img.bmp, delay, img.width, img.height, img.left, img.top, dispose, 1)
       end
 
-      @bmp = frames[0].bmp
+      # The first GIF image may be smaller than (or offset within) the logical
+      # screen, so blit it onto a full-canvas transparent bitmap rather than
+      # exposing the bare sub-image. This keeps `#bmp` sized `width`×`height`
+      # (== `canvas_width`×`canvas_height`), matching the PNG/IHDR path and the
+      # dimensions consumers expect. The common full-screen first frame takes
+      # the alias fast path with no extra allocation.
+      first = frames[0]
+      if first.x_offset == 0 && first.y_offset == 0 &&
+         first.width == @canvas_width && first.height == @canvas_height
+        @bmp = first.bmp
+      else
+        canvas = Array.new(@canvas_height) { Array.new(@canvas_width) { Pixel.new(0, 0, 0, 0) } }
+        first.height.times do |sy|
+          cy = first.y_offset + sy
+          next unless cy >= 0 && cy < @canvas_height
+          frow = first.bmp[sy]?
+          next unless frow
+          first.width.times do |sx|
+            cx = first.x_offset + sx
+            next unless cx >= 0 && cx < @canvas_width
+            if px = frow[sx]?
+              canvas[cy][cx] = px
+            end
+          end
+        end
+        @bmp = canvas
+      end
       if frames.size > 1
         @actl = {"numFrames" => frames.size, "numPlays" => gif.num_plays}
         @num_plays = gif.num_plays
