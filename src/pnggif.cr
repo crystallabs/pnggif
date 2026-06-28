@@ -1285,14 +1285,24 @@ module PNGGIF
       cc = 1 << code_size
       eoi = cc + 1
       stack = [] of Int32
+      # Initialise the dictionary to its post-Clear state up front. A
+      # spec-conformant stream opens with a Clear code, whose handler below
+      # reinitialises `table`/`ntable`/`max_elem` identically, so valid input is
+      # unaffected. But a corrupt stream that omits that leading Clear would
+      # otherwise reach the `old_code == -1` literal path (or the code lookups
+      # below) with `table` still empty and raise a raw IndexError instead of
+      # decoding as gracefully as the rest of the decoder handles bad input.
       table = [] of Tuple(Int32, Int32, Int32)
-      ntable = 0
+      cc.times { |i| table << {i, -1, i} }
+      table << {0, -1, 0}
+      table << {0, -1, 0}
+      ntable = cc + 2
       old_code = -1
       buffer = 0
       nbuffer = 0
       p = 0
       buf = expected > 0 ? Array(Int32).new(expected) : [] of Int32
-      max_elem = 0
+      max_elem = 1 << bit_depth
 
       loop do
         if stack.empty?
