@@ -486,73 +486,77 @@ module PNGGIF
     # to `raw_sample` + `sample_to_8bit`. Palette indices (type 3) are used raw.
     private def build_pixel_row(line : Bytes) : Array(Pixel)
       w = @width
-      row = Array(Pixel).new(w)
       eight = @bit_depth == 8
+      # `line` is exactly `@byte_width` bytes (the caller's reused scanline
+      # buffer), so every 8-bit indexed read below stays in bounds and can skip
+      # the per-byte bounds check via the raw pointer.
+      src = line.to_unsafe
 
       case @color_type
       when 0 # grayscale
-        x = 0
-        while x < w
-          v = eight ? line[x].to_i : sample_to_8bit(raw_sample(line, x))
-          row << Pixel.new(v, v, v, 255)
-          x += 1
+        if eight
+          Array(Pixel).new(w) do |x|
+            v = src[x].to_i
+            Pixel.new(v, v, v, 255)
+          end
+        else
+          Array(Pixel).new(w) do |x|
+            v = sample_to_8bit(raw_sample(line, x))
+            Pixel.new(v, v, v, 255)
+          end
         end
       when 2 # RGB
         if eight
-          i = 0
-          while i < w * 3
-            row << Pixel.new(line[i].to_i, line[i + 1].to_i, line[i + 2].to_i, 255)
-            i += 3
+          Array(Pixel).new(w) do |x|
+            o = x * 3
+            Pixel.new(src[o].to_i, src[o + 1].to_i, src[o + 2].to_i, 255)
           end
         else
-          x = 0
-          while x < w
+          Array(Pixel).new(w) do |x|
             b = x * 3
-            row << Pixel.new(sample_to_8bit(raw_sample(line, b)), sample_to_8bit(raw_sample(line, b + 1)), sample_to_8bit(raw_sample(line, b + 2)), 255)
-            x += 1
+            Pixel.new(sample_to_8bit(raw_sample(line, b)), sample_to_8bit(raw_sample(line, b + 1)), sample_to_8bit(raw_sample(line, b + 2)), 255)
           end
         end
       when 3 # palette index (raw sample, never scaled)
-        x = 0
-        while x < w
-          idx = eight ? line[x].to_i : raw_sample(line, x)
-          row << (@palette[idx]? || Pixel.new(0, 0, 0, 0))
-          x += 1
+        if eight
+          Array(Pixel).new(w) { |x| @palette[src[x].to_i]? || Pixel.new(0, 0, 0, 0) }
+        else
+          Array(Pixel).new(w) { |x| @palette[raw_sample(line, x)]? || Pixel.new(0, 0, 0, 0) }
         end
       when 4 # grayscale + alpha
         if eight
-          i = 0
-          while i < w * 2
-            v = line[i].to_i
-            row << Pixel.new(v, v, v, line[i + 1].to_i)
-            i += 2
+          Array(Pixel).new(w) do |x|
+            o = x * 2
+            v = src[o].to_i
+            Pixel.new(v, v, v, src[o + 1].to_i)
           end
         else
-          x = 0
-          while x < w
+          Array(Pixel).new(w) do |x|
             b = x * 2
             v = sample_to_8bit(raw_sample(line, b))
-            row << Pixel.new(v, v, v, sample_to_8bit(raw_sample(line, b + 1)))
-            x += 1
+            Pixel.new(v, v, v, sample_to_8bit(raw_sample(line, b + 1)))
           end
         end
       when 6 # RGBA
         if eight
-          i = 0
-          while i < w * 4
-            row << Pixel.new(line[i].to_i, line[i + 1].to_i, line[i + 2].to_i, line[i + 3].to_i)
-            i += 4
+          # `Pixel` is four consecutive `UInt8`s in r,g,b,a order, which is byte
+          # for byte the layout of an 8-bit RGBA scanline. So copy the whole line
+          # straight into the row's pixel buffer instead of constructing each
+          # pixel channel-by-channel (one `memcpy` vs. 4·w byte loads + stores).
+          Array(Pixel).build(w) do |pbuf|
+            src.copy_to(pbuf.as(UInt8*), w * 4)
+            w
           end
         else
-          x = 0
-          while x < w
+          Array(Pixel).new(w) do |x|
             b = x * 4
-            row << Pixel.new(sample_to_8bit(raw_sample(line, b)), sample_to_8bit(raw_sample(line, b + 1)), sample_to_8bit(raw_sample(line, b + 2)), sample_to_8bit(raw_sample(line, b + 3)))
-            x += 1
+            Pixel.new(sample_to_8bit(raw_sample(line, b)), sample_to_8bit(raw_sample(line, b + 1)), sample_to_8bit(raw_sample(line, b + 2)), sample_to_8bit(raw_sample(line, b + 3)))
           end
         end
+      else
+        # Unknown/invalid color type: preserve the old empty-row result.
+        Array(Pixel).new(w)
       end
-      row
     end
 
     # Reverses a PNG scanline filter in place. The filter type is constant for
