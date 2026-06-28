@@ -253,6 +253,12 @@ module PNGGIF
 
         case name
         when "IHDR"
+          # IHDR carries 13 fixed bytes (w/h/depth/colour/compression/filter/
+          # interlace). The chunk-length guard above only proves `data` fits in
+          # the buffer, not that it is long enough for these reads, so a corrupt
+          # short IHDR would otherwise raise a raw IndexError. Stop cleanly
+          # (downstream then raises "no image data") like the truncation break.
+          break if data.size < 13
           @width = u32(data, 0).to_i
           @height = u32(data, 4).to_i
           @bit_depth = data[8].to_i
@@ -296,9 +302,16 @@ module PNGGIF
           # decode; `inflate` copies it out, so no defensive dup is needed.
           @idat << data
         when "acTL"
+          # numFrames(4) + numPlays(4) = 8 fixed bytes; skip a corrupt short
+          # acTL rather than letting the u32 reads run off the slice.
+          next if data.size < 8
           @actl = {"numFrames" => u32(data, 0).to_i, "numPlays" => u32(data, 4).to_i}
           @num_plays = u32(data, 4).to_i
         when "fcTL"
+          # parse_fctl reads through byte 25 (seq#(4) + w/h/x/y(16) + delay(4) +
+          # dispose/blend(2) = 26 bytes); skip a corrupt short fcTL so those
+          # fixed reads can't index past the slice.
+          next if data.size < 26
           fctl = parse_fctl(data)
           if @idat.empty?
             # IDAT is itself the first frame: acTL->fcTL->IDAT
