@@ -1059,14 +1059,24 @@ module PNGGIF
         # above so a short file raises a clean error instead of the IndexError
         # that the unbounded `buf[p]` reads below would otherwise produce.
         raise "bad gif header: truncated global color table" unless p + total * 3 <= buf.size
-        total.times do
-          @colors << Pixel.new(buf[p].to_i, buf[p + 1].to_i, buf[p + 2].to_i, 255)
-          p += 3
-        end
+        p = read_color_table(buf, p, total, @colors)
       end
 
       p = parse_blocks(buf, p)
       raise "no image data or bad decompress" if @images.empty?
+    end
+
+    # Reads *total* RGB color-table entries (3 bytes each) starting at *p* into
+    # *into* (opaque), returning the position just past the table. The caller is
+    # responsible for the truncation guard, so the in-bounds reads here can't run
+    # off the buffer. Shared by the global (constructor) and local (`parse_image`)
+    # color-table parsers.
+    private def read_color_table(buf : Bytes, p : Int32, total : Int32, into : Array(Pixel)) : Int32
+      total.times do
+        into << Pixel.new(buf[p].to_i, buf[p + 1].to_i, buf[p + 2].to_i, 255)
+        p += 3
+      end
+      p
     end
 
     private def parse_blocks(buf : Bytes, p : Int32) : Int32
@@ -1194,10 +1204,7 @@ module PNGGIF
         # the constructor; without this the `buf[p]` reads below raise a raw
         # IndexError instead of a clean decode error.
         raise "bad gif image: truncated local color table" unless p + total * 3 <= buf.size
-        total.times do
-          table << Pixel.new(buf[p].to_i, buf[p + 1].to_i, buf[p + 2].to_i, 255)
-          p += 3
-        end
+        p = read_color_table(buf, p, total, table)
       end
 
       # The LZW minimum-code-size byte follows the (optional) local color table;
