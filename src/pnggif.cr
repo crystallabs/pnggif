@@ -1307,6 +1307,20 @@ module PNGGIF
       img.bmp = bmp
     end
 
+    # Builds the LZW dictionary in its initial / post-Clear state: `cc` literal
+    # entries (each `{value, prev = -1, first = value}`) followed by two reserved
+    # slots for the Clear (cc) and EOI (cc+1) codes, so the array index stays in
+    # lockstep with `ntable` (which starts at cc+2) as new entries are appended.
+    # Shared by `lzw_decompress`'s up-front initialisation and its Clear-code
+    # handler, which must reset to byte-identical state.
+    private def lzw_init_table(cc : Int32) : Array(Tuple(Int32, Int32, Int32))
+      table = [] of Tuple(Int32, Int32, Int32)
+      cc.times { |i| table << {i, -1, i} }
+      table << {0, -1, 0}
+      table << {0, -1, 0}
+      table
+    end
+
     # LZW decompression ported from tng.js / ka-cs-programs gif-reader (MIT).
     # *expected* is the final index count (image `width*height`); presizing the
     # output array avoids ~log2(N) reallocations + full copies as it fills.
@@ -1322,10 +1336,7 @@ module PNGGIF
       # otherwise reach the `old_code == -1` literal path (or the code lookups
       # below) with `table` still empty and raise a raw IndexError instead of
       # decoding as gracefully as the rest of the decoder handles bad input.
-      table = [] of Tuple(Int32, Int32, Int32)
-      cc.times { |i| table << {i, -1, i} }
-      table << {0, -1, 0}
-      table << {0, -1, 0}
+      table = lzw_init_table(cc)
       ntable = cc + 2
       old_code = -1
       buffer = 0
@@ -1357,13 +1368,7 @@ module PNGGIF
           break if code == eoi
 
           if code == cc
-            table = [] of Tuple(Int32, Int32, Int32)
-            cc.times { |i| table << {i, -1, i} }
-            # Reserve slots for the Clear (cc) and EOI (cc+1) codes so that the
-            # array index stays in lockstep with `ntable` (which starts at cc+2)
-            # as new entries are appended.
-            table << {0, -1, 0}
-            table << {0, -1, 0}
+            table = lzw_init_table(cc)
             bit_depth = code_size + 1
             max_elem = 1 << bit_depth
             ntable = cc + 2
