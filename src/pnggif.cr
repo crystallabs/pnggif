@@ -259,8 +259,17 @@ module PNGGIF
           # short IHDR would otherwise raise a raw IndexError. Stop cleanly
           # (downstream then raises "no image data") like the truncation break.
           break if data.size < 13
-          @width = u32(data, 0).to_i
-          @height = u32(data, 4).to_i
+          # Width/height are 4-byte fields but valid PNG values are 1..2^31-1, so
+          # a corrupt dimension with bit 31 set is out of spec. The length guard
+          # above only proves the field is present, not sane: such a value makes
+          # the very next `.to_i` (UInt32 -> Int32) raise a raw OverflowError mid-
+          # parse. Reject it up front like the invalid-bit-depth guard below so a
+          # malformed header fails as a clean decode error instead.
+          w = u32(data, 0)
+          h = u32(data, 4)
+          raise "bad png: invalid dimensions #{w}x#{h}" if w > Int32::MAX.to_u32 || h > Int32::MAX.to_u32
+          @width = w.to_i
+          @height = h.to_i
           @bit_depth = data[8].to_i
           # Only {1,2,4,8,16} are valid PNG bit depths. The length guard above
           # proves the field is present, not that its value is sane: a corrupt
@@ -737,6 +746,15 @@ module PNGGIF
     private def sample_interlaced_lines(raw : Bytes) : Array(Int32)
       adam7 = [{0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0, 2, 2, 4}, {1, 0, 2, 2}, {0, 1, 1, 2}]
       psize = (@bit_depth / 8.0) * @sample_depth
+      # `vpr` (samples per row) and the flat `vpr * @height` sample buffer are
+      # Int32 products. The IHDR guard only bounds @width/@height individually to
+      # <= Int32::MAX, so for a large interlaced image their product (times the
+      # 1..4 @sample_depth) can exceed Int32 and make these very multiplications
+      # raise a raw OverflowError mid-decode. The non-interlaced path streams
+      # row-by-row and never allocates this whole-image buffer, so it is immune;
+      # reject the oversized interlaced case up front via an Int64 product like
+      # the GIF dimension guard, so it fails as a clean decode error instead.
+      raise "bad png: interlaced image too large" if @width.to_i64 * @sample_depth * @height > Int32::MAX
       vpr = @width * @sample_depth
       samples = Array(Int32).new(vpr * @height, 0)
       source = 0
@@ -896,9 +914,10 @@ module PNGGIF
 
     # Blits *frame*'s sub-image onto *canvas* at its offset, clamping to the
     # canvas bounds (frames may legitimately extend past it). With `blend: true`
-    # (APNG/GIF "over") fully-transparent source pixels are skipped so the canvas
-    # shows through; with `blend: false` ("source", and the GIF first-frame
-    # paste onto a transparent canvas) every in-bounds pixel is written verbatim.
+    # (APNG/GIF "over") the source is composited onto the canvas so a partially
+    # transparent pixel lets the canvas show through proportionally; with
+    # `blend: false` ("source", and the GIF first-frame paste onto a transparent
+    # canvas) every in-bounds pixel is written verbatim.
     private def blit_frame(frame : Frame, canvas : Bitmap, blend : Bool)
       frame.height.times do |sy|
         fy = frame.y_offset + sy
@@ -911,9 +930,38 @@ module PNGGIF
           next unless fx >= 0 && fx < @canvas_width
           px = frow[sx]?
           next unless px
-          crow[fx] = px unless blend && px.a == 0
+          if blend
+            sa = px.a
+            # Fully transparent: leave the canvas untouched (it shows through).
+            next if sa == 0
+            # Partially transparent APNG BLEND_OP_OVER source: alpha-composite
+            # over the existing canvas pixel rather than replacing it. (GIF and
+            # opaque/transparent APNG pixels have alpha 0 or 255 and skip this,
+            # so their result is byte-identical to a verbatim copy.)
+            px = composite_over(px, crow[fx]) if sa < 255
+          end
+          crow[fx] = px
         end
       end
+    end
+
+    # Porter-Duff "source over destination" for straight (non-premultiplied)
+    # alpha, all channels in 0..255 with rounding. Only the partially
+    # transparent APNG BLEND_OP_OVER case reaches here; fully opaque/transparent
+    # pixels are short-circuited by the caller, so the GIF (binary-alpha) path is
+    # unaffected. Previously such pixels were written verbatim, which *replaced*
+    # the canvas (BLEND_OP_SOURCE) instead of compositing over it.
+    private def composite_over(src : Pixel, dst : Pixel) : Pixel
+      sa = src.a
+      # Destination's surviving weight: da * (1 - sa), rounded.
+      ia = (dst.a * (255 - sa) + 127) // 255
+      oa = sa + ia
+      return Pixel.new(0, 0, 0, 0) if oa <= 0
+      half = oa // 2
+      r = (src.r * sa + dst.r * ia + half) // oa
+      g = (src.g * sa + dst.g * ia + half) // oa
+      b = (src.b * sa + dst.b * ia + half) // oa
+      Pixel.new(r, g, b, oa)
     end
 
     private def each_rect(frame : Frame, &)
@@ -1200,6 +1248,15 @@ module PNGGIF
       img.top = u16(buf, p).to_i; p += 2
       img.width = u16(buf, p).to_i; p += 2
       img.height = u16(buf, p).to_i; p += 2
+      # width/height are each u16 (0..65535), so their product (the pixel count
+      # used below as `lzw_decompress`'s `expected` capacity and the interlaced
+      # sample-buffer size) can reach 65535² ≈ 4.29e9 and overflow Int32 for any
+      # frame with width*height > Int32::MAX (~46341²). Crystal's default
+      # overflow checking then makes `img.width * img.height` raise a raw
+      # OverflowError mid-decode. Reject it up front via an Int64 product like
+      # the IHDR-dimension guard on the PNG side, so an oversized frame fails as
+      # a clean decode error instead.
+      raise "bad gif image: dimensions #{img.width}x#{img.height} too large" if img.width.to_i64 * img.height.to_i64 > Int32::MAX
       flags = buf[p].to_i; p += 1
       lct = (flags & 0x80) != 0
       img.interlaced = (flags & 0x40) != 0
@@ -1297,7 +1354,15 @@ module PNGGIF
         if col >= w
           col = 0
           row += interlacing[ilp][1]
-          if row >= h && ilp < interlacing.size - 1
+          # Skip *every* pass whose starting row is already past the image, not
+          # just one. The four Adam7 passes start at rows 0, 4, 2, 1; for a short
+          # image several of those starts can exceed `h` at once (e.g. h<=4 makes
+          # pass 2's start of 4 empty). Advancing a single pass per row-overflow
+          # left `row` on an out-of-range pass, so that pass's whole row of
+          # indices was dropped (`pos >= samples.size`) and every later row landed
+          # in the wrong pass — scrambling/blanking short interlaced GIFs. Loop
+          # until `row` lands inside the image (or passes are exhausted).
+          while row >= h && ilp < interlacing.size - 1
             ilp += 1
             row = interlacing[ilp][0]
           end
