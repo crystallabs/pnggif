@@ -381,6 +381,33 @@ module PNGGIF
 
     # --------------------------------------------------------------- scanlines
 
+    # Reads one filtered scanline out of *data* at *pos* into the caller's
+    # fixed-size `line` buffer and unfilters it in place against *prior*,
+    # returning the position just past the consumed `1 + line.size` bytes.
+    # `pos` must be a valid index (`< data.size`); the copy is clamped with
+    # `Math.min` so a truncated final line can't read past the buffer, and any
+    # short tail is zero-filled to match fresh-buffer semantics (a no-op for the
+    # interlace path's already-zeroed line). Shared by the non-interlaced
+    # `decode_image` loop and `sample_interlaced_lines`, whose per-row read +
+    # unfilter step is otherwise byte-for-byte identical.
+    private def read_scanline(data : Bytes, pos : Int32, line : Bytes, prior : Bytes) : Int32
+      filter = data[pos].to_i
+      pos += 1
+      width = line.size
+      n = Math.min(width, data.size - pos)
+      data[pos, n].copy_to(line) if n > 0
+      if n < width
+        k = n < 0 ? 0 : n
+        while k < width
+          line[k] = 0u8
+          k += 1
+        end
+      end
+      pos += width
+      unfilter_line filter, line, prior
+      pos
+    end
+
     private def compute_metrics
       @sample_depth = case @color_type
                       when 0 then 1
@@ -421,22 +448,10 @@ module PNGGIF
       line = buf_b
       p = 0
       while p < data.size
-        filter = data[p].to_i
-        p += 1
-        n = Math.min(@byte_width, data.size - p)
-        data[p, n].copy_to(line) if n > 0
-        # A full scanline fully overwrites `line`; only a short final line needs
-        # its stale tail (from a previous row) cleared to match fresh-buffer
-        # semantics.
-        if n < @byte_width
-          k = n < 0 ? 0 : n
-          while k < @byte_width
-            line[k] = 0u8
-            k += 1
-          end
-        end
-        p += @byte_width
-        unfilter_line filter, line, prior
+        # `read_scanline` copies the (clamped) line out of `data` and unfilters
+        # it in place; a short final line has its stale tail cleared so the
+        # reused buffer matches fresh-buffer semantics.
+        p = read_scanline(data, p, line, prior)
         rows << build_pixel_row(line)
         prior, line = line, prior
       end
@@ -735,13 +750,8 @@ module PNGGIF
         y = ystart
         while y < @height
           break if source >= raw.size
-          filter = raw[source].to_i
-          source += 1
           line = Bytes.new(row_size, 0u8)
-          n = Math.min(row_size, raw.size - source)
-          raw[source, n].copy_to(line) if n > 0
-          source += row_size
-          unfilter_line filter, line, recon
+          source = read_scanline(raw, source, line, recon)
           recon = line
           flat = [] of Int32
           sample_line_into flat, line, ppr
