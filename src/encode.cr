@@ -128,13 +128,23 @@ module PNGGIF
     # delay = delay_num/delay_den seconds, both uint16. With millisecond units
     # (den 1000) delay_num only reaches 65_535 ms (~65 s), so simply clamping it
     # would silently *misreport* any longer frame delay. Drop to centisecond
-    # units (den 100) past that point, which still round-trips the value while
-    # extending the range to ~655 s.
+    # units (den 100) past that point, extending the range to ~655 s. Round to
+    # the nearest centisecond rather than truncating: truncation biases every
+    # long delay short by up to 9 ms and, at the unit boundary, makes the encoded
+    # delay non-monotonic (65_536 ms would floor to 6553 cs = 65.53 s, *below*
+    # the 65.535 s of the 65_535 ms low-branch value).
     delay_ms = 0 if delay_ms < 0
     if delay_ms <= UInt16::MAX
       delay_num, delay_den = delay_ms.to_u16, 1000_u16
     else
-      delay_num, delay_den = (delay_ms // 10).clamp(0, UInt16::MAX.to_i).to_u16, 100_u16
+      # `delay_ms + 5` would overflow `Int32` for a delay near `Int32::MAX`
+      # (Crystal's `+` raises on overflow rather than wrapping, aborting the
+      # encode) before the round-and-clamp could cap it. Any delay at/above
+      # 655_345 ms already rounds to the 65_535-cs ceiling, so cap there first;
+      # below it, `delay_ms + 5` stays well inside `Int32` and the rounded value
+      # is <= 65_534, so `to_u16` needs no further clamp.
+      cs = delay_ms >= 655_345 ? UInt16::MAX.to_i : (delay_ms + 5) // 10
+      delay_num, delay_den = cs.to_u16, 100_u16
     end
     write_u16 m, delay_num # delay_num
     write_u16 m, delay_den # delay_den
