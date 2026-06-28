@@ -57,10 +57,10 @@ module PNGGIF
     # caller passing -1 almost certainly intends. APNG already spells "infinite"
     # as 0, so fold any negative value to 0.
     num_plays = 0 if num_plays < 0
-    actl = IO::Memory.new
-    write_u32 actl, frames.size.to_u32
-    write_u32 actl, num_plays.to_u32
-    write_chunk io, "acTL", actl.to_slice
+    write_chunk io, "acTL" do |actl|
+      write_u32 actl, frames.size.to_u32
+      write_u32 actl, num_plays.to_u32
+    end
 
     seq = 0_u32
     frames.each_with_index do |(bmp, delay), i|
@@ -71,7 +71,7 @@ module PNGGIF
       if fw != w || fh != h
         raise ArgumentError.new("encode_apng: frame #{i} (#{fw}x#{fh}) does not match canvas #{w}x#{h}")
       end
-      write_chunk io, "fcTL", fctl(seq, fw, fh, delay)
+      write_chunk(io, "fcTL") { |m| fctl(m, seq, fw, fh, delay) }
       seq += 1
 
       data = compress_image(bmp, fw, fh)
@@ -80,10 +80,10 @@ module PNGGIF
         write_chunk io, "IDAT", data
       else
         # Subsequent frames: fdAT = 4-byte sequence number + the IDAT payload.
-        fdat = IO::Memory.new
-        write_u32 fdat, seq
-        fdat.write data
-        write_chunk io, "fdAT", fdat.to_slice
+        write_chunk io, "fdAT" do |fdat|
+          write_u32 fdat, seq
+          fdat.write data
+        end
         seq += 1
       end
     end
@@ -105,21 +105,20 @@ module PNGGIF
   end
 
   private def self.write_ihdr(io : IO, w : Int32, h : Int32) : Nil
-    ihdr = IO::Memory.new
-    write_u32 ihdr, w.to_u32
-    write_u32 ihdr, h.to_u32
-    ihdr.write_byte 8u8 # bit depth
-    ihdr.write_byte 6u8 # color type: truecolor + alpha
-    ihdr.write_byte 0u8 # compression: deflate
-    ihdr.write_byte 0u8 # filter method: adaptive (per-scanline byte)
-    ihdr.write_byte 0u8 # interlace: none
-    write_chunk io, "IHDR", ihdr.to_slice
+    write_chunk io, "IHDR" do |ihdr|
+      write_u32 ihdr, w.to_u32
+      write_u32 ihdr, h.to_u32
+      ihdr.write_byte 8u8 # bit depth
+      ihdr.write_byte 6u8 # color type: truecolor + alpha
+      ihdr.write_byte 0u8 # compression: deflate
+      ihdr.write_byte 0u8 # filter method: adaptive (per-scanline byte)
+      ihdr.write_byte 0u8 # interlace: none
+    end
   end
 
   # APNG per-frame control: position (always 0,0 — we encode full frames), size,
   # delay as a fraction (delay_ms / 1000), and dispose/blend set to overwrite.
-  private def self.fctl(seq : UInt32, w : Int32, h : Int32, delay_ms : Int32) : Bytes
-    m = IO::Memory.new
+  private def self.fctl(m : IO, seq : UInt32, w : Int32, h : Int32, delay_ms : Int32) : Nil
     write_u32 m, seq
     write_u32 m, w.to_u32
     write_u32 m, h.to_u32
@@ -148,9 +147,8 @@ module PNGGIF
     end
     write_u16 m, delay_num # delay_num
     write_u16 m, delay_den # delay_den
-    m.write_byte 0u8                                                              # dispose_op: NONE
-    m.write_byte 0u8                                                              # blend_op: SOURCE (overwrite)
-    m.to_slice
+    m.write_byte 0u8 # dispose_op: NONE
+    m.write_byte 0u8 # blend_op: SOURCE (overwrite)
   end
 
   # Filters and deflates *bmp* into the compressed PNG image data in one streaming
@@ -202,6 +200,15 @@ module PNGGIF
       end
     end
     mem.to_slice
+  end
+
+  # Build a chunk whose payload is assembled by the block into a fresh buffer,
+  # then framed with `write_chunk`. Folds the `IO::Memory.new` / `to_slice`
+  # scaffolding repeated by every length-prefixed chunk (IHDR, acTL, fcTL, fdAT).
+  private def self.write_chunk(io : IO, type : String, & : IO ->) : Nil
+    m = IO::Memory.new
+    yield m
+    write_chunk io, type, m.to_slice
   end
 
   private def self.write_chunk(io : IO, type : String, data : Bytes) : Nil
