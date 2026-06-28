@@ -1342,6 +1342,11 @@ module PNGGIF
           end
 
           if old_code == -1
+            # The first data code must reference an existing dictionary entry
+            # (a literal, < cc). A corrupt stream whose first code lands in the
+            # not-yet-defined range [cc+2, max_elem) would index `table` (size
+            # cc+2) past its end; stop cleanly like the truncation return above.
+            break if code >= ntable
             old_code = code
             buf << table[code][0]
             next
@@ -1356,6 +1361,12 @@ module PNGGIF
             table << {table[code][2], old_code, table[old_code][2]}
             ntable += 1
           else
+            # `code >= ntable`: only `code == ntable` is valid (the KwKwK case,
+            # resolved by the entry appended just below). A corrupt `code >
+            # ntable` references an entry that still won't exist after the
+            # append, so the `table[code]` walk would raise IndexError — bail
+            # out gracefully instead, matching the decoder's bad-input handling.
+            break if code > ntable
             k = table[old_code][2]
             table << {k, old_code, k}
             ntable += 1
