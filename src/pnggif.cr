@@ -1203,6 +1203,13 @@ module PNGGIF
       # one byte past the end.
       raise "bad gif image: truncated image data" unless p < buf.size
       code_size = buf[p].to_i; p += 1
+      # The GIF LZW minimum code size is 2..8 (the color-table bit depth). A
+      # corrupt value drives `lzw_decompress`'s `cc = 1 << code_size`: e.g. ~30
+      # makes `cc` a billion and `cc.times { table << ... }` allocates until the
+      # process is OOM-killed, while >=31 wraps `cc` negative and corrupts the
+      # decode. Reject it up front like the other GIF header guards instead of
+      # letting one corrupt byte trigger unbounded allocation.
+      raise "bad gif image: invalid LZW minimum code size #{code_size}" unless 2 <= code_size <= 8
       lzw, p = gather_subblocks(buf, p)
 
       img.delay = @gc_delay
