@@ -874,21 +874,7 @@ module PNGGIF
         end
 
         # Blit the frame onto the canvas (blend_op 0 = source, 1 = over).
-        frame.height.times do |sy|
-          fy = frame.y_offset + sy
-          next unless fy >= 0 && fy < @canvas_height
-          frow = frame.bmp[sy]?
-          next unless frow
-          frame.width.times do |sx|
-            fx = frame.x_offset + sx
-            next unless fx >= 0 && fx < @canvas_width
-            px = frow[sx]?
-            next unless px
-            if frame.blend_op == 0 || px.a != 0
-              canvas[fy][fx] = px
-            end
-          end
-        end
+        blit_frame frame, canvas, blend: frame.blend_op != 0
 
         prev_snapshot = snapshot
         prev = frame
@@ -896,6 +882,28 @@ module PNGGIF
       end
 
       result
+    end
+
+    # Blits *frame*'s sub-image onto *canvas* at its offset, clamping to the
+    # canvas bounds (frames may legitimately extend past it). With `blend: true`
+    # (APNG/GIF "over") fully-transparent source pixels are skipped so the canvas
+    # shows through; with `blend: false` ("source", and the GIF first-frame
+    # paste onto a transparent canvas) every in-bounds pixel is written verbatim.
+    private def blit_frame(frame : Frame, canvas : Bitmap, blend : Bool)
+      frame.height.times do |sy|
+        fy = frame.y_offset + sy
+        next unless fy >= 0 && fy < @canvas_height
+        frow = frame.bmp[sy]?
+        next unless frow
+        crow = canvas[fy]
+        frame.width.times do |sx|
+          fx = frame.x_offset + sx
+          next unless fx >= 0 && fx < @canvas_width
+          px = frow[sx]?
+          next unless px
+          crow[fx] = px unless blend && px.a == 0
+        end
+      end
     end
 
     private def each_rect(frame : Frame, &)
@@ -940,19 +948,9 @@ module PNGGIF
         @bmp = first.bmp
       else
         canvas = Array.new(@canvas_height) { Array.new(@canvas_width) { Pixel.new(0, 0, 0, 0) } }
-        first.height.times do |sy|
-          cy = first.y_offset + sy
-          next unless cy >= 0 && cy < @canvas_height
-          frow = first.bmp[sy]?
-          next unless frow
-          first.width.times do |sx|
-            cx = first.x_offset + sx
-            next unless cx >= 0 && cx < @canvas_width
-            if px = frow[sx]?
-              canvas[cy][cx] = px
-            end
-          end
-        end
+        # Paste the sub-image onto the transparent canvas, writing every pixel
+        # (including transparent ones, which keep their GIF RGB) verbatim.
+        blit_frame first, canvas, blend: false
         @bmp = canvas
       end
       if frames.size > 1
