@@ -58,8 +58,8 @@ module PNGGIF
     # as 0, so fold any negative value to 0.
     num_plays = 0 if num_plays < 0
     actl = IO::Memory.new
-    actl.write_bytes frames.size.to_u32, IO::ByteFormat::BigEndian
-    actl.write_bytes num_plays.to_u32, IO::ByteFormat::BigEndian
+    write_u32 actl, frames.size.to_u32
+    write_u32 actl, num_plays.to_u32
     write_chunk io, "acTL", actl.to_slice
 
     seq = 0_u32
@@ -81,7 +81,7 @@ module PNGGIF
       else
         # Subsequent frames: fdAT = 4-byte sequence number + the IDAT payload.
         fdat = IO::Memory.new
-        fdat.write_bytes seq, IO::ByteFormat::BigEndian
+        write_u32 fdat, seq
         fdat.write data
         write_chunk io, "fdAT", fdat.to_slice
         seq += 1
@@ -106,8 +106,8 @@ module PNGGIF
 
   private def self.write_ihdr(io : IO, w : Int32, h : Int32) : Nil
     ihdr = IO::Memory.new
-    ihdr.write_bytes w.to_u32, IO::ByteFormat::BigEndian
-    ihdr.write_bytes h.to_u32, IO::ByteFormat::BigEndian
+    write_u32 ihdr, w.to_u32
+    write_u32 ihdr, h.to_u32
     ihdr.write_byte 8u8 # bit depth
     ihdr.write_byte 6u8 # color type: truecolor + alpha
     ihdr.write_byte 0u8 # compression: deflate
@@ -120,11 +120,11 @@ module PNGGIF
   # delay as a fraction (delay_ms / 1000), and dispose/blend set to overwrite.
   private def self.fctl(seq : UInt32, w : Int32, h : Int32, delay_ms : Int32) : Bytes
     m = IO::Memory.new
-    m.write_bytes seq, IO::ByteFormat::BigEndian
-    m.write_bytes w.to_u32, IO::ByteFormat::BigEndian
-    m.write_bytes h.to_u32, IO::ByteFormat::BigEndian
-    m.write_bytes 0_u32, IO::ByteFormat::BigEndian                                # x_offset
-    m.write_bytes 0_u32, IO::ByteFormat::BigEndian                                # y_offset
+    write_u32 m, seq
+    write_u32 m, w.to_u32
+    write_u32 m, h.to_u32
+    write_u32 m, 0_u32 # x_offset
+    write_u32 m, 0_u32 # y_offset
     # delay = delay_num/delay_den seconds, both uint16. With millisecond units
     # (den 1000) delay_num only reaches 65_535 ms (~65 s), so simply clamping it
     # would silently *misreport* any longer frame delay. Drop to centisecond
@@ -136,8 +136,8 @@ module PNGGIF
     else
       delay_num, delay_den = (delay_ms // 10).clamp(0, UInt16::MAX.to_i).to_u16, 100_u16
     end
-    m.write_bytes delay_num, IO::ByteFormat::BigEndian                           # delay_num
-    m.write_bytes delay_den, IO::ByteFormat::BigEndian                           # delay_den
+    write_u16 m, delay_num # delay_num
+    write_u16 m, delay_den # delay_den
     m.write_byte 0u8                                                              # dispose_op: NONE
     m.write_byte 0u8                                                              # blend_op: SOURCE (overwrite)
     m.to_slice
@@ -195,12 +195,24 @@ module PNGGIF
   end
 
   private def self.write_chunk(io : IO, type : String, data : Bytes) : Nil
-    io.write_bytes data.size.to_u32, IO::ByteFormat::BigEndian
+    write_u32 io, data.size.to_u32
     type_bytes = type.to_slice
     io.write type_bytes
     io.write data
     crc = Digest::CRC32.update(type_bytes, Digest::CRC32.initial)
     crc = Digest::CRC32.update(data, crc)
-    io.write_bytes crc, IO::ByteFormat::BigEndian
+    write_u32 io, crc
+  end
+
+  # PNG stores every multi-byte integer in network (big-endian) order; these
+  # wrap the one stdlib call so that convention lives in a single place instead
+  # of being respelled at every IHDR/acTL/fcTL/fdAT/chunk-framing field. Width
+  # is explicit in the name so each call site still commits to a u32 or u16.
+  private def self.write_u32(io : IO, value : UInt32) : Nil
+    io.write_bytes value, IO::ByteFormat::BigEndian
+  end
+
+  private def self.write_u16(io : IO, value : UInt16) : Nil
+    io.write_bytes value, IO::ByteFormat::BigEndian
   end
 end
