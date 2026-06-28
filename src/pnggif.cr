@@ -262,6 +262,14 @@ module PNGGIF
           @width = u32(data, 0).to_i
           @height = u32(data, 4).to_i
           @bit_depth = data[8].to_i
+          # Only {1,2,4,8,16} are valid PNG bit depths. The length guard above
+          # proves the field is present, not that its value is sane: a corrupt
+          # depth of 0 makes `compute_metrics` derive a zero `@byte_width` (empty
+          # scanline buffer) and a zero `sample_to_8bit` divisor `(1<<0)-1`, so
+          # decoding would raise a raw IndexError / DivisionByZeroError mid-row
+          # instead of a clean decode error. Reject it up front like "bad png
+          # header" does for a malformed signature.
+          raise "bad png: invalid bit depth #{@bit_depth}" unless {1, 2, 4, 8, 16}.includes?(@bit_depth)
           @color_type = data[9].to_i
           @compression = data[10].to_i
           @filter = data[11].to_i
