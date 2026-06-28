@@ -28,7 +28,7 @@ module PNGGIF
     w, h = bitmap_dimensions bmp
     write_signature io
     write_ihdr io, w, h
-    write_chunk io, "IDAT", deflate(filter_none(bmp, w, h))
+    write_chunk io, "IDAT", compress_image(bmp, w, h)
     write_chunk io, "IEND", Bytes.empty
   end
 
@@ -74,7 +74,7 @@ module PNGGIF
       write_chunk io, "fcTL", fctl(seq, fw, fh, delay)
       seq += 1
 
-      data = deflate(filter_none(bmp, fw, fh))
+      data = compress_image(bmp, fw, fh)
       if i == 0
         # First frame's pixels live in IDAT (shared with still viewers).
         write_chunk io, "IDAT", data
@@ -143,35 +143,41 @@ module PNGGIF
     m.to_slice
   end
 
-  # Serializes *bmp* to raw PNG image data: each scanline prefixed with filter
-  # byte 0 (None), then R,G,B,A per pixel. Short rows are padded transparent.
-  private def self.filter_none(bmp : Bitmap, w : Int32, h : Int32) : Bytes
-    stride = w * 4
-    data = Bytes.new(h * (stride + 1))
-    oi = 0
-    h.times do |y|
-      data[oi] = 0u8 # filter: None
-      oi += 1
-      row = bmp[y]
-      rn = row.size
-      x = 0
-      while x < w
-        if x < rn
-          px = row.unsafe_fetch(x)
-          data[oi] = px.r.to_u8!; data[oi + 1] = px.g.to_u8!
-          data[oi + 2] = px.b.to_u8!; data[oi + 3] = px.a.to_u8!
-        end # else leaves {0,0,0,0} transparent
-        oi += 4
-        x += 1
-      end
-    end
-    data
-  end
-
-  private def self.deflate(raw : Bytes) : Bytes
+  # Filters and deflates *bmp* into the compressed PNG image data in one streaming
+  # pass, returning the IDAT/fdAT payload. Each scanline is filter type 0 (None) —
+  # filter byte, then R,G,B,A per pixel; short rows are padded transparent.
+  #
+  # The filtered scanlines are fed straight into the `Compress::Zlib::Writer`
+  # through a single reused `stride + 1` buffer rather than first materializing
+  # the whole `w * h * 4` raw image: peak intermediate memory drops from O(w*h)
+  # to O(w), which matters for the megapixel bitmaps / many-frame APNGs this
+  # encoder targets, and sidesteps the `Int32` overflow of a `w * h`-sized alloc.
+  private def self.compress_image(bmp : Bitmap, w : Int32, h : Int32) : Bytes
+    line = Bytes.new(w * 4 + 1)
+    line[0] = 0u8 # filter: None — never overwritten, so set once.
     mem = IO::Memory.new
     Compress::Zlib::Writer.open(mem) do |zw|
-      zw.write raw
+      h.times do |y|
+        row = bmp[y]
+        rn = row.size
+        oi = 1
+        x = 0
+        while x < w
+          if x < rn
+            px = row.unsafe_fetch(x)
+            line[oi] = px.r.to_u8!; line[oi + 1] = px.g.to_u8!
+            line[oi + 2] = px.b.to_u8!; line[oi + 3] = px.a.to_u8!
+          else
+            # The buffer is reused across rows, so padding must be re-zeroed
+            # (it would otherwise retain the previous row's pixels).
+            line[oi] = 0u8; line[oi + 1] = 0u8
+            line[oi + 2] = 0u8; line[oi + 3] = 0u8
+          end
+          oi += 4
+          x += 1
+        end
+        zw.write line
+      end
     end
     mem.to_slice
   end
