@@ -153,8 +153,8 @@ module PNGGIF
     end
     write_u16 m, delay_num # delay_num
     write_u16 m, delay_den # delay_den
-    m.write_byte 0u8 # dispose_op: NONE
-    m.write_byte 0u8 # blend_op: SOURCE (overwrite)
+    m.write_byte 0u8       # dispose_op: NONE
+    m.write_byte 0u8       # blend_op: SOURCE (overwrite)
   end
 
   # Filters and deflates *bmp* into the compressed PNG image data in one streaming

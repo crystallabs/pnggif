@@ -1167,7 +1167,7 @@ module PNGGIF
       if label == 0xf9 # graphic control
         # block-size(1) + fields(1) + delay(2) + transparent-index(1) = 5 bytes.
         raise "bad gif: truncated graphic-control extension" unless p + 5 <= buf.size
-        p += 1         # block size (always 4)
+        p += 1 # block size (always 4)
         fields = buf[p].to_i
         @gc_dispose = (fields >> 2) & 0x07
         use_transparent = (fields & 0x01) != 0
@@ -1181,7 +1181,7 @@ module PNGGIF
       elsif label == 0xff # application extension (NETSCAPE loop count)
         # block-size(1) + 8-byte id + 3-byte auth code = 12 bytes.
         raise "bad gif: truncated application extension" unless p + 12 <= buf.size
-        p += 1            # block size (always 11)
+        p += 1 # block size (always 11)
         id = String.new(buf[p, 8])
         auth = String.new(buf[p + 8, 3])
         p += 11
