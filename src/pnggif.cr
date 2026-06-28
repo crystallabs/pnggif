@@ -1227,6 +1227,17 @@ module PNGGIF
       p
     end
 
+    # Maps one GIF color index to its `Pixel`: looks the index up in the active
+    # (global or local) palette, falling back to transparent for an out-of-range
+    # index, and clears alpha to 0 when the index is the graphic-control
+    # transparent color. Shared by the interlaced and non-interlaced bitmap
+    # builders so the lookup + color-key rule stays in one place.
+    private def gif_color(table : Array(Pixel), b : Int32, transparent : Int32) : Pixel
+      color = table[b]? || Pixel.new(0, 0, 0, 0)
+      return Pixel.new(color.r, color.g, color.b, 0) if transparent >= 0 && b == transparent
+      color
+    end
+
     private def build_gif_bitmap(img, indices, table, transparent)
       w = img.width
       h = img.height
@@ -1241,10 +1252,7 @@ module PNGGIF
           line = Array(Pixel).new(w)
           w.times do
             if k < n
-              b = indices[k]
-              color = table[b]? || Pixel.new(0, 0, 0, 0)
-              color = Pixel.new(color.r, color.g, color.b, 0) if transparent >= 0 && b == transparent
-              line << color
+              line << gif_color(table, indices[k], transparent)
             else
               line << Pixel.new(0, 0, 0, 0)
             end
@@ -1266,9 +1274,7 @@ module PNGGIF
       indices.each do |b|
         pos = row * w + col
         if pos < samples.size
-          color = table[b]? || Pixel.new(0, 0, 0, 0)
-          color = Pixel.new(color.r, color.g, color.b, 0) if transparent >= 0 && b == transparent
-          samples[pos] = color
+          samples[pos] = gif_color(table, b, transparent)
         end
         col += 1
         if col >= w
