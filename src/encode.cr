@@ -3,11 +3,10 @@ require "digest/crc32"
 
 # PNG / APNG **encoder** for `PNGGIF` (the rest of the shard only decodes).
 #
-# Output is always truecolor + alpha (PNG color type 6, 8-bit depth), which is
+# Output is always truecolor + alpha (PNG color type 6, 8-bit depth), matching
 # the in-memory `Bitmap` format exactly, so no quantization is needed. Scanlines
-# use filter type 0 (None); `Compress::Zlib` does the compression and `Digest::CRC32`
-# the per-chunk checksums — both already in Crystal's stdlib, so this adds no
-# dependency.
+# use filter type 0 (None); `Compress::Zlib` and `Digest::CRC32` (both stdlib)
+# handle compression and per-chunk checksums, adding no dependency.
 #
 # * `PNGGIF.encode_png(bmp)`   — a single still image.
 # * `PNGGIF.encode_apng(frames)` — an animated PNG from `{bitmap, delay_ms}` frames,
@@ -48,10 +47,9 @@ module PNGGIF
     write_ihdr io, w, h
 
     # acTL: animation control (frame count + loop count). A negative loop count
-    # is meaningless: written verbatim it would two's-complement-wrap into a huge
-    # *finite* count (e.g. -1 -> 4_294_967_295) rather than the infinite loop a
-    # caller passing -1 almost certainly intends. APNG already spells "infinite"
-    # as 0, so fold any negative value to 0.
+    # would two's-complement-wrap into a huge finite count (e.g. -1 ->
+    # 4_294_967_295) instead of the infinite loop intended, so fold negatives
+    # to 0 (APNG's spelling of "infinite").
     num_plays = 0 if num_plays < 0
     write_chunk io, "acTL" do |actl|
       write_u32 actl, frames.size.to_u32
@@ -61,9 +59,9 @@ module PNGGIF
     seq = 0_u32
     frames.each_with_index do |(bmp, delay), i|
       fw, fh = bitmap_dimensions bmp
-      # All frames share the canvas size: they are encoded at offset 0,0 with
-      # dispose NONE / blend SOURCE (full-frame replace), so an undersized frame
-      # would leave the previous frame's pixels showing in the uncovered region.
+      # Frames are encoded at offset 0,0 with dispose NONE / blend SOURCE
+      # (full-frame replace), so an undersized frame would leave the previous
+      # frame's pixels showing in the uncovered region.
       if fw != w || fh != h
         raise ArgumentError.new("encode_apng: frame #{i} (#{fw}x#{fh}) does not match canvas #{w}x#{h}")
       end
@@ -89,10 +87,9 @@ module PNGGIF
 
   # ---- internals -----------------------------------------------------------
 
-  # Runs *block* against a fresh in-memory IO and returns everything it wrote as
-  # a byte slice — the `IO::Memory.new` / `to_slice` bookend shared by the two
-  # public `encode_*(…) : Bytes` overloads, which only differ in which `(…, io)`
-  # twin they frame.
+  # Runs *block* against a fresh in-memory IO and returns everything it wrote,
+  # sharing the `IO::Memory.new` / `to_slice` bookend between the two public
+  # `encode_*(…) : Bytes` overloads.
   private def self.encode_to_bytes(& : IO ->) : Bytes
     io = IO::Memory.new
     yield io
@@ -130,24 +127,19 @@ module PNGGIF
     write_u32 m, h.to_u32
     write_u32 m, 0_u32 # x_offset
     write_u32 m, 0_u32 # y_offset
-    # delay = delay_num/delay_den seconds, both uint16. With millisecond units
-    # (den 1000) delay_num only reaches 65_535 ms (~65 s), so simply clamping it
-    # would silently *misreport* any longer frame delay. Drop to centisecond
-    # units (den 100) past that point, extending the range to ~655 s. Round to
-    # the nearest centisecond rather than truncating: truncation biases every
-    # long delay short by up to 9 ms and, at the unit boundary, makes the encoded
-    # delay non-monotonic (65_536 ms would floor to 6553 cs = 65.53 s, *below*
-    # the 65.535 s of the 65_535 ms low-branch value).
+    # delay = delay_num/delay_den seconds, both uint16. Millisecond units (den
+    # 1000) only reach 65_535 ms (~65 s); past that, switch to centisecond units
+    # (den 100), extending the range to ~655 s. Round rather than truncate:
+    # truncation biases delays short and makes the encoded value non-monotonic
+    # at the unit boundary (65_536 ms would floor to 65.53 s, below the 65.535 s
+    # of the 65_535 ms low-branch value).
     delay_ms = 0 if delay_ms < 0
     if delay_ms <= UInt16::MAX
       delay_num, delay_den = delay_ms.to_u16, 1000_u16
     else
-      # `delay_ms + 5` would overflow `Int32` for a delay near `Int32::MAX`
-      # (Crystal's `+` raises on overflow rather than wrapping, aborting the
-      # encode) before the round-and-clamp could cap it. Any delay at/above
-      # 655_345 ms already rounds to the 65_535-cs ceiling, so cap there first;
-      # below it, `delay_ms + 5` stays well inside `Int32` and the rounded value
-      # is <= 65_534, so `to_u16` needs no further clamp.
+      # Cap at 655_345 ms first to avoid `delay_ms + 5` overflowing `Int32`
+      # (which raises rather than wraps) for delays near `Int32::MAX`; below
+      # that cap the rounded value stays <= 65_534, needing no further clamp.
       cs = delay_ms >= 655_345 ? UInt16::MAX.to_i : (delay_ms + 5) // 10
       delay_num, delay_den = cs.to_u16, 100_u16
     end
@@ -158,14 +150,13 @@ module PNGGIF
   end
 
   # Filters and deflates *bmp* into the compressed PNG image data in one streaming
-  # pass, returning the IDAT/fdAT payload. Each scanline is filter type 0 (None) —
+  # pass, returning the IDAT/fdAT payload. Each scanline is filter type 0 (None):
   # filter byte, then R,G,B,A per pixel; short rows are padded transparent.
   #
-  # The filtered scanlines are fed straight into the `Compress::Zlib::Writer`
-  # through a single reused `stride + 1` buffer rather than first materializing
-  # the whole `w * h * 4` raw image: peak intermediate memory drops from O(w*h)
-  # to O(w), which matters for the megapixel bitmaps / many-frame APNGs this
-  # encoder targets, and sidesteps the `Int32` overflow of a `w * h`-sized alloc.
+  # Scanlines are fed to `Compress::Zlib::Writer` through a single reused
+  # `stride + 1` buffer instead of materializing the whole `w * h * 4` raw
+  # image: peak memory drops from O(w*h) to O(w), and avoids `Int32` overflow
+  # on a `w * h`-sized allocation.
   private def self.compress_image(bmp : Bitmap, w : Int32, h : Int32) : Bytes
     line = Bytes.new(w * 4 + 1)
     line[0] = 0u8 # filter: None — never overwritten, so set once.
@@ -176,13 +167,11 @@ module PNGGIF
         row = bmp[y]
         rn = row.size
         if rn >= w && sizeof(Pixel) == 4
-          # `Pixel` is four contiguous bytes laid out r,g,b,a — byte-for-byte the
-          # PNG color-type-6 scanline order — so a full-width row's element storage
-          # can be copied straight into the scanline (after the filter byte),
-          # skipping the per-pixel accessor round-trips. The `sizeof` guard folds to
-          # a compile-time constant and keeps this exact-equivalent to the scalar
-          # path below should the struct layout ever change. Extra pixels (rn > w)
-          # are simply not copied.
+          # `Pixel` is four contiguous bytes r,g,b,a — byte-for-byte the PNG
+          # color-type-6 scanline order — so a full-width row's storage can be
+          # copied straight in, skipping per-pixel accessors. The `sizeof` guard
+          # falls back to the scalar path if the struct layout ever changes.
+          # Extra pixels (rn > w) are not copied.
           dst.copy_from(row.to_unsafe.as(UInt8*), w * 4)
         else
           oi = 1
@@ -193,8 +182,8 @@ module PNGGIF
               line[oi] = px.r.to_u8!; line[oi + 1] = px.g.to_u8!
               line[oi + 2] = px.b.to_u8!; line[oi + 3] = px.a.to_u8!
             else
-              # The buffer is reused across rows, so padding must be re-zeroed
-              # (it would otherwise retain the previous row's pixels).
+              # Buffer is reused across rows, so padding must be re-zeroed or it
+              # retains the previous row's pixels.
               line[oi] = 0u8; line[oi + 1] = 0u8
               line[oi + 2] = 0u8; line[oi + 3] = 0u8
             end
@@ -208,9 +197,9 @@ module PNGGIF
     mem.to_slice
   end
 
-  # Build a chunk whose payload is assembled by the block into a fresh buffer,
-  # then framed with `write_chunk`. Folds the `IO::Memory.new` / `to_slice`
-  # scaffolding repeated by every length-prefixed chunk (IHDR, acTL, fcTL, fdAT).
+  # Builds a chunk whose payload is assembled by the block into a fresh buffer,
+  # then frames it with `write_chunk`. Shared by every length-prefixed chunk
+  # (IHDR, acTL, fcTL, fdAT).
   private def self.write_chunk(io : IO, type : String, & : IO ->) : Nil
     m = IO::Memory.new
     yield m
@@ -227,10 +216,9 @@ module PNGGIF
     write_u32 io, crc
   end
 
-  # PNG stores every multi-byte integer in network (big-endian) order; these
-  # wrap the one stdlib call so that convention lives in a single place instead
-  # of being respelled at every IHDR/acTL/fcTL/fdAT/chunk-framing field. Width
-  # is explicit in the name so each call site still commits to a u32 or u16.
+  # PNG stores multi-byte integers big-endian; these wrap the stdlib call so
+  # the convention lives in one place. Width is explicit in the name so each
+  # call site commits to a u32 or u16.
   private def self.write_u32(io : IO, value : UInt32) : Nil
     io.write_bytes value, IO::ByteFormat::BigEndian
   end

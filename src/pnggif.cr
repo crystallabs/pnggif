@@ -17,11 +17,10 @@ module PNGGIF
   # A single RGBA pixel. Channels are 0..255; `a` is opacity (255 = opaque).
   #
   # Channels are stored as `UInt8` (4 bytes/pixel instead of 4×`Int32` = 16) so
-  # that megapixel `Bitmap`s and the cellmap downscale / animation composite
-  # loops touch 4× less memory and stay cache-resident. The accessors keep the
-  # public `Int32` (0..255) contract: `px.r # => Int32` and `Pixel.new` still
-  # takes `Int32` args. Out-of-range values wrap (`to_u8!`); all internal
-  # producers already emit 0..255.
+  # megapixel `Bitmap`s and the cellmap downscale / composite loops touch 4×
+  # less memory and stay cache-resident. Accessors keep the public `Int32`
+  # (0..255) contract. Out-of-range values wrap (`to_u8!`); internal producers
+  # already emit 0..255.
   struct Pixel
     @r : UInt8
     @g : UInt8
@@ -96,12 +95,11 @@ module PNGGIF
   # * `#cellmap` — `bmp` downscaled to terminal-cell resolution
   # * `#frames`  — animation frames (APNG / animated GIF), or `nil` if static
   #
-  # The cellmap is intended for solid-block terminal rendering (one cell per
-  # sampled pixel, the cell's background = the pixel color). Because a character
-  # cell is typically about twice as tall as it is wide, the missing cellmap
-  # dimension is derived using `cell_aspect` (default `2.0`) so the image keeps
-  # its visual proportions instead of looking vertically stretched. Output is
-  # full 24-bit RGB; consumers pick their own color-reduction if needed.
+  # The cellmap is for solid-block terminal rendering (one cell per sampled
+  # pixel, cell background = pixel color). A character cell is typically ~2x
+  # taller than wide, so the missing cellmap dimension is derived using
+  # `cell_aspect` (default `2.0`) to keep proportions correct. Output is full
+  # 24-bit RGB; consumers pick their own color-reduction if needed.
   class PNG
     getter width : Int32 = 0
     getter height : Int32 = 0
@@ -168,11 +166,9 @@ module PNGGIF
     end
 
     # Builds an animated `PNG` directly from already-decoded, full-canvas
-    # *frames* (`{bitmap, delay_ms}`) — e.g. video frames produced by an
-    # external decoder — bypassing all file parsing. Each frame is treated as a
-    # full, independent canvas image (`blend_op = source`, no disposal), so
-    # `#animation_cellmaps` and the usual playback path work unchanged.
-    # *num_plays* is the loop count (`0` = loop forever).
+    # *frames* (`{bitmap, delay_ms}`), bypassing file parsing. Each frame is
+    # treated as a full, independent canvas image (`blend_op = source`, no
+    # disposal). *num_plays* is the loop count (`0` = loop forever).
     def self.from_frames(frames : Array(Tuple(Bitmap, Int32)),
                          canvas_width : Int32, canvas_height : Int32,
                          num_plays : Int32 = 0) : PNG
@@ -241,10 +237,9 @@ module PNGGIF
         i += 4
         name = String.new(buf[i, 4])
         i += 4
-        # Stop (don't crash) on a truncated/corrupt chunk whose length overruns
-        # the buffer. Comparing as UInt32 also avoids `to_i` overflowing on a
-        # length with the high bit set, which would otherwise raise before this
-        # guard could fire.
+        # Stop on a truncated/corrupt chunk whose length overruns the buffer.
+        # Comparing as UInt32 avoids `to_i` overflowing on a length with the
+        # high bit set, which would otherwise raise before this guard fires.
         break if len > (buf.size - i).to_u32
         n = len.to_i
         data = buf[i, n]
@@ -254,30 +249,24 @@ module PNGGIF
         case name
         when "IHDR"
           # IHDR carries 13 fixed bytes (w/h/depth/colour/compression/filter/
-          # interlace). The chunk-length guard above only proves `data` fits in
-          # the buffer, not that it is long enough for these reads, so a corrupt
-          # short IHDR would otherwise raise a raw IndexError. Stop cleanly
-          # (downstream then raises "no image data") like the truncation break.
+          # interlace). The chunk-length guard above doesn't prove `data` is long
+          # enough for these reads, so a corrupt short IHDR would otherwise raise
+          # a raw IndexError. Stop cleanly (downstream raises "no image data").
           break if data.size < 13
-          # Width/height are 4-byte fields but valid PNG values are 1..2^31-1, so
-          # a corrupt dimension with bit 31 set is out of spec. The length guard
-          # above only proves the field is present, not sane: such a value makes
-          # the very next `.to_i` (UInt32 -> Int32) raise a raw OverflowError mid-
-          # parse. Reject it up front like the invalid-bit-depth guard below so a
-          # malformed header fails as a clean decode error instead.
+          # Width/height are 4-byte fields but valid PNG values are 1..2^31-1; a
+          # dimension with bit 31 set would make the next `.to_i` (UInt32->Int32)
+          # raise a raw OverflowError mid-parse. Reject up front for a clean
+          # decode error instead.
           w = u32(data, 0)
           h = u32(data, 4)
           raise "bad png: invalid dimensions #{w}x#{h}" if w > Int32::MAX.to_u32 || h > Int32::MAX.to_u32
           @width = w.to_i
           @height = h.to_i
           @bit_depth = data[8].to_i
-          # Only {1,2,4,8,16} are valid PNG bit depths. The length guard above
-          # proves the field is present, not that its value is sane: a corrupt
-          # depth of 0 makes `compute_metrics` derive a zero `@byte_width` (empty
-          # scanline buffer) and a zero `sample_to_8bit` divisor `(1<<0)-1`, so
-          # decoding would raise a raw IndexError / DivisionByZeroError mid-row
-          # instead of a clean decode error. Reject it up front like "bad png
-          # header" does for a malformed signature.
+          # Only {1,2,4,8,16} are valid PNG bit depths. A corrupt depth of 0 would
+          # make `compute_metrics` derive a zero `@byte_width` and a zero
+          # `sample_to_8bit` divisor, raising IndexError/DivisionByZeroError
+          # mid-row instead of a clean decode error.
           raise "bad png: invalid bit depth #{@bit_depth}" unless {1, 2, 4, 8, 16}.includes?(@bit_depth)
           @color_type = data[9].to_i
           @compression = data[10].to_i
@@ -301,13 +290,13 @@ module PNGGIF
               @palette[idx] = Pixel.new(old.r, old.g, old.b, alpha.to_i)
             end
           when 0
-            # Grayscale color key: a single 2-byte gray sample (bit-depth range).
+            # Grayscale color key: single 2-byte gray sample.
             if data.size >= 2
               g = sample_to_8bit(u16(data, 0).to_i)
               @trns = {g, g, g}
             end
           when 2
-            # Truecolor color key: three 2-byte R/G/B samples (bit-depth range).
+            # Truecolor color key: three 2-byte R/G/B samples.
             if data.size >= 6
               @trns = {sample_to_8bit(u16(data, 0).to_i),
                        sample_to_8bit(u16(data, 2).to_i),
@@ -319,15 +308,13 @@ module PNGGIF
           # decode; `inflate` copies it out, so no defensive dup is needed.
           @idat << data
         when "acTL"
-          # numFrames(4) + numPlays(4) = 8 fixed bytes; skip a corrupt short
-          # acTL rather than letting the u32 reads run off the slice.
+          # numFrames(4) + numPlays(4) = 8 fixed bytes; skip a corrupt short acTL.
           next if data.size < 8
           @actl = {"numFrames" => u32(data, 0).to_i, "numPlays" => u32(data, 4).to_i}
           @num_plays = u32(data, 4).to_i
         when "fcTL"
           # parse_fctl reads through byte 25 (seq#(4) + w/h/x/y(16) + delay(4) +
-          # dispose/blend(2) = 26 bytes); skip a corrupt short fcTL so those
-          # fixed reads can't index past the slice.
+          # dispose/blend(2) = 26 bytes); skip a corrupt short fcTL.
           next if data.size < 26
           fctl = parse_fctl(data)
           if @idat.empty?
@@ -337,11 +324,10 @@ module PNGGIF
             @raw_frames << {fctl: fctl, fdat: [] of Bytes, idat: false}
           end
         when "fdAT"
-          # First 4 bytes are a sequence number; the rest is zlib data. Skip
-          # (don't crash on) a corrupt/misordered stream: an fdAT before any
-          # fcTL would index an empty `@raw_frames`, and one shorter than its
-          # 4-byte sequence number would slice with a negative count — both
-          # mirror the chunk-length truncation guard above.
+          # First 4 bytes are a sequence number; the rest is zlib data. Skip a
+          # corrupt/misordered stream: an fdAT before any fcTL would index an
+          # empty `@raw_frames`, and one shorter than its sequence number would
+          # slice with a negative count.
           if !@raw_frames.empty? && n >= 4
             @raw_frames[-1][:fdat] << data[4, n - 4]
           end
@@ -376,11 +362,10 @@ module PNGGIF
         next if idat.empty?
         bmp = decode_image idat
         den = fc["delayDen"] == 0 ? 100 : fc["delayDen"]
-        # Integer math: the delay is delayNum/delayDen seconds in milliseconds.
-        # The old `(delayNum / den * 1000).to_i` did float division then
-        # truncated, so spec-correct values such as 1001/1000 s read back as
-        # 1000 ms instead of 1001 (floor of 1000.999…). delayNum ≤ 65535, so
-        # delayNum*1000 stays well within Int32.
+        # Integer math: delay is delayNum/delayDen seconds, in milliseconds. The
+        # old `(delayNum / den * 1000).to_i` did float division then truncated,
+        # so spec-correct values like 1001/1000s read back as 1000ms instead of
+        # 1001. delayNum <= 65535, so delayNum*1000 stays within Int32.
         delay = (fc["delayNum"].to_i64 * 1000 // den).to_i32
         frames << Frame.new(bmp, delay, fc["width"], fc["height"],
           fc["xOffset"], fc["yOffset"], fc["disposeOp"], fc["blendOp"])
@@ -393,12 +378,10 @@ module PNGGIF
     # Reads one filtered scanline out of *data* at *pos* into the caller's
     # fixed-size `line` buffer and unfilters it in place against *prior*,
     # returning the position just past the consumed `1 + line.size` bytes.
-    # `pos` must be a valid index (`< data.size`); the copy is clamped with
-    # `Math.min` so a truncated final line can't read past the buffer, and any
-    # short tail is zero-filled to match fresh-buffer semantics (a no-op for the
-    # interlace path's already-zeroed line). Shared by the non-interlaced
-    # `decode_image` loop and `sample_interlaced_lines`, whose per-row read +
-    # unfilter step is otherwise byte-for-byte identical.
+    # `pos` must be `< data.size`; the copy is clamped with `Math.min` so a
+    # truncated final line can't read past the buffer, and any short tail is
+    # zero-filled. Shared by the non-interlaced `decode_image` loop and
+    # `sample_interlaced_lines`.
     private def read_scanline(data : Bytes, pos : Int32, line : Bytes, prior : Bytes) : Int32
       filter = data[pos].to_i
       pos += 1
@@ -432,12 +415,10 @@ module PNGGIF
     end
 
     # Decodes the IDAT/fdAT byte stream straight into a `Bitmap`. The
-    # non-interlaced path is fully fused: each unfiltered scanline is converted
-    # directly into a row of `Pixel`s, so the full-image `Array(Int32)` samples
-    # buffer (16 MB for a megapixel RGBA image) and the separate
-    # `parse_lines`+`create_bitmap` read pass are both gone. Adam7 interlacing
-    # genuinely needs random-access reassembly, so it keeps the
-    # `sample_interlaced_lines` → `create_bitmap` route.
+    # non-interlaced path is fully fused: each unfiltered scanline converts
+    # directly into a row of `Pixel`s, avoiding a full-image samples buffer.
+    # Adam7 interlacing needs random-access reassembly, so it keeps the
+    # `sample_interlaced_lines` -> `create_bitmap` route.
     private def decode_image(data : Bytes) : Bitmap
       compute_metrics
       if @interlace == 1
@@ -457,9 +438,6 @@ module PNGGIF
       line = buf_b
       p = 0
       while p < data.size
-        # `read_scanline` copies the (clamped) line out of `data` and unfilters
-        # it in place; a short final line has its stale tail cleared so the
-        # reused buffer matches fresh-buffer semantics.
         p = read_scanline(data, p, line, prior)
         rows << build_pixel_row(line)
         prior, line = line, prior
@@ -470,8 +448,7 @@ module PNGGIF
 
     # Applies grayscale/truecolor `tRNS` color-key transparency: every pixel
     # whose (8-bit) RGB equals the keyed color has its alpha cleared to 0. Runs
-    # only when `@trns` is set (rare), so the per-pixel decode hot paths stay
-    # untouched.
+    # only when `@trns` is set (rare).
     private def apply_color_trns(bmp : Bitmap)
       t = @trns
       return unless t
@@ -511,9 +488,8 @@ module PNGGIF
     private def build_pixel_row(line : Bytes) : Array(Pixel)
       w = @width
       eight = @bit_depth == 8
-      # `line` is exactly `@byte_width` bytes (the caller's reused scanline
-      # buffer), so every 8-bit indexed read below stays in bounds and can skip
-      # the per-byte bounds check via the raw pointer.
+      # `line` is exactly `@byte_width` bytes, so every 8-bit indexed read below
+      # stays in bounds and can skip the per-byte bounds check via the raw pointer.
       src = line.to_unsafe
 
       case @color_type
@@ -563,10 +539,9 @@ module PNGGIF
         end
       when 6 # RGBA
         if eight
-          # `Pixel` is four consecutive `UInt8`s in r,g,b,a order, which is byte
-          # for byte the layout of an 8-bit RGBA scanline. So copy the whole line
-          # straight into the row's pixel buffer instead of constructing each
-          # pixel channel-by-channel (one `memcpy` vs. 4·w byte loads + stores).
+          # `Pixel` is four consecutive `UInt8`s in r,g,b,a order — byte-for-byte
+          # the layout of an 8-bit RGBA scanline — so copy the whole line
+          # straight in (one `memcpy`) instead of constructing pixel-by-pixel.
           Array(Pixel).build(w) do |pbuf|
             src.copy_to(pbuf.as(UInt8*), w * 4)
             w
@@ -584,11 +559,9 @@ module PNGGIF
     end
 
     # Reverses a PNG scanline filter in place. The filter type is constant for
-    # the whole line, so it is dispatched once here rather than per byte; each
+    # the whole line, so it's dispatched once here rather than per byte; each
     # branch reads only the neighbours it needs. `prior` is always the same size
-    # as `line` (the caller allocates both at `@byte_width` / the interlace pass's
-    # row size), so the previous per-byte `< prior.size` guards were dead and are
-    # gone. Filter `a` (left) and `c` (upper-left) are zero for the first pixel.
+    # as `line`. Filter `a` (left) and `c` (upper-left) are zero for the first pixel.
     private def unfilter_line(filter : Int32, line : Bytes, prior : Bytes)
       return if filter == 0
       bpp = @bytes_per_pixel
@@ -681,10 +654,10 @@ module PNGGIF
       end
     end
 
-    # Color type is constant for the image, so it is dispatched once here rather
+    # Color type is constant for the image, so it's dispatched once here rather
     # than per pixel. Each branch unpacks `@sample_depth` samples into one Pixel
-    # and flushes a row every `w` pixels; a trailing partial row (if any) is
-    # appended at the end, matching the original behaviour.
+    # and flushes a row every `w` pixels; a trailing partial row is appended at
+    # the end.
     private def create_bitmap(samples : Array(Int32)) : Bitmap
       rows = Bitmap.new
       w = @width
@@ -747,13 +720,10 @@ module PNGGIF
       adam7 = [{0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0, 2, 2, 4}, {1, 0, 2, 2}, {0, 1, 1, 2}]
       psize = (@bit_depth / 8.0) * @sample_depth
       # `vpr` (samples per row) and the flat `vpr * @height` sample buffer are
-      # Int32 products. The IHDR guard only bounds @width/@height individually to
-      # <= Int32::MAX, so for a large interlaced image their product (times the
-      # 1..4 @sample_depth) can exceed Int32 and make these very multiplications
-      # raise a raw OverflowError mid-decode. The non-interlaced path streams
-      # row-by-row and never allocates this whole-image buffer, so it is immune;
-      # reject the oversized interlaced case up front via an Int64 product like
-      # the GIF dimension guard, so it fails as a clean decode error instead.
+      # Int32 products; for a large interlaced image these can exceed Int32 and
+      # raise a raw OverflowError mid-decode (the non-interlaced path streams
+      # row-by-row and is immune). Reject the oversized case up front via an
+      # Int64 product for a clean decode error instead.
       raise "bad png: interlaced image too large" if @width.to_i64 * @sample_depth * @height > Int32::MAX
       vpr = @width * @sample_depth
       samples = Array(Int32).new(vpr * @height, 0)
@@ -803,11 +773,10 @@ module PNGGIF
     # defaulting to the values supplied at construction).
     #
     # When only one dimension is fixed (or neither), the other is derived from
-    # the image's pixel aspect ratio and then corrected by `cell_aspect` so the
-    # result isn't vertically stretched on non-square cells: terminal cells are
-    # ~2× taller than wide, so a square image needs ~half as many rows as
-    # columns. When both `cmwidth` and `cmheight` are given, they are used
-    # verbatim (the caller takes responsibility for proportions).
+    # the image's pixel aspect ratio and corrected by `cell_aspect` so the
+    # result isn't vertically stretched on non-square cells (terminal cells are
+    # ~2x taller than wide). When both `cmwidth` and `cmheight` are given, they
+    # are used verbatim.
     def create_cellmap(bmp : Bitmap, cmwidth : Int32? = @cell_width, cmheight : Int32? = @cell_height, scale : Float64 = @scale, cell_aspect : Float64 = @cell_aspect) : Bitmap
       return Bitmap.new if bmp.empty? || bmp[0].empty?
       height = bmp.size
@@ -832,10 +801,10 @@ module PNGGIF
 
       cellmap = Bitmap.new(cmheight)
       y = 0.0
-      # Emit exactly cmheight × cmwidth cells. The sample positions still step by
+      # Emit exactly cmheight x cmwidth cells. The sample positions step by
       # `ys`/`xs`, but the index is clamped to the last valid row/column instead
-      # of breaking: when upscaling (cm* larger than the source), the final step
-      # rounds to `height`/`width`, which previously dropped the last row/column.
+      # of breaking: when upscaling, the final step rounds to `height`/`width`,
+      # which previously dropped the last row/column.
       cmheight.times do
         yy = y.round.to_i
         yy = height - 1 if yy >= height
@@ -883,9 +852,8 @@ module PNGGIF
         end
 
         # Snapshot this frame's region if it will need restoring afterwards.
-        # Frames may extend past the canvas (common in real-world GIFs), so
-        # clamp like the blit loop below; out-of-bounds cells store transparent
-        # and are never read back (the restore via `each_rect` is also clamped).
+        # Frames may extend past the canvas, so clamp like the blit loop below;
+        # out-of-bounds cells store transparent and are never read back.
         snapshot = nil
         if frame.dispose_op == 2
           snapshot = Bitmap.new
@@ -913,11 +881,10 @@ module PNGGIF
     end
 
     # Blits *frame*'s sub-image onto *canvas* at its offset, clamping to the
-    # canvas bounds (frames may legitimately extend past it). With `blend: true`
-    # (APNG/GIF "over") the source is composited onto the canvas so a partially
-    # transparent pixel lets the canvas show through proportionally; with
-    # `blend: false` ("source", and the GIF first-frame paste onto a transparent
-    # canvas) every in-bounds pixel is written verbatim.
+    # canvas bounds. With `blend: true` (APNG/GIF "over") the source is
+    # composited onto the canvas so a partially transparent pixel lets the
+    # canvas show through; with `blend: false` ("source") every in-bounds pixel
+    # is written verbatim.
     private def blit_frame(frame : Frame, canvas : Bitmap, blend : Bool)
       frame.height.times do |sy|
         fy = frame.y_offset + sy
@@ -932,12 +899,11 @@ module PNGGIF
           next unless px
           if blend
             sa = px.a
-            # Fully transparent: leave the canvas untouched (it shows through).
+            # Fully transparent: leave the canvas untouched.
             next if sa == 0
             # Partially transparent APNG BLEND_OP_OVER source: alpha-composite
-            # over the existing canvas pixel rather than replacing it. (GIF and
-            # opaque/transparent APNG pixels have alpha 0 or 255 and skip this,
-            # so their result is byte-identical to a verbatim copy.)
+            # over the existing canvas pixel. (Opaque/transparent pixels have
+            # alpha 0 or 255 and skip this — byte-identical to a verbatim copy.)
             px = composite_over(px, crow[fx]) if sa < 255
           end
           crow[fx] = px
@@ -946,11 +912,9 @@ module PNGGIF
     end
 
     # Porter-Duff "source over destination" for straight (non-premultiplied)
-    # alpha, all channels in 0..255 with rounding. Only the partially
-    # transparent APNG BLEND_OP_OVER case reaches here; fully opaque/transparent
-    # pixels are short-circuited by the caller, so the GIF (binary-alpha) path is
-    # unaffected. Previously such pixels were written verbatim, which *replaced*
-    # the canvas (BLEND_OP_SOURCE) instead of compositing over it.
+    # alpha, all channels in 0..255 with rounding. Only the partially transparent
+    # APNG BLEND_OP_OVER case reaches here; opaque/transparent pixels are
+    # short-circuited by the caller.
     private def composite_over(src : Pixel, dst : Pixel) : Pixel
       sa = src.a
       # Destination's surviving weight: da * (1 - sa), rounded.
@@ -996,10 +960,9 @@ module PNGGIF
 
       # The first GIF image may be smaller than (or offset within) the logical
       # screen, so blit it onto a full-canvas transparent bitmap rather than
-      # exposing the bare sub-image. This keeps `#bmp` sized `width`×`height`
-      # (== `canvas_width`×`canvas_height`), matching the PNG/IHDR path and the
-      # dimensions consumers expect. The common full-screen first frame takes
-      # the alias fast path with no extra allocation.
+      # exposing the bare sub-image. Keeps `#bmp` sized `width`x`height`,
+      # matching the PNG/IHDR path. The common full-screen first frame takes the
+      # alias fast path with no extra allocation.
       first = frames[0]
       if first.x_offset == 0 && first.y_offset == 0 &&
          first.width == @canvas_width && first.height == @canvas_height
@@ -1096,8 +1059,8 @@ module PNGGIF
 
     def initialize(buf : Bytes)
       # The 6-byte signature + 7-byte logical screen descriptor must be present
-      # before any of them is read; guard up front (like the PNG header check)
-      # so a truncated buffer raises a clean error instead of an IndexError.
+      # before any of them is read; guard up front so a truncated buffer raises
+      # a clean error instead of an IndexError.
       raise "bad gif header: truncated" unless buf.size >= 13
       sig = String.new(buf[0, 6])
       raise "bad gif header: #{sig}" unless sig == "GIF87a" || sig == "GIF89a"
@@ -1112,10 +1075,9 @@ module PNGGIF
 
       if gct
         total = 1 << gctsize
-        # A truncated file may declare a global color table (up to 256×3 bytes)
-        # that runs past the buffer. Guard it like the 13-byte header check
-        # above so a short file raises a clean error instead of the IndexError
-        # that the unbounded `buf[p]` reads below would otherwise produce.
+        # A truncated file may declare a global color table (up to 256x3 bytes)
+        # that runs past the buffer; guard it for a clean error instead of an
+        # IndexError from the unbounded `buf[p]` reads below.
         raise "bad gif header: truncated global color table" unless p + total * 3 <= buf.size
         p = read_color_table(buf, p, total, @colors)
       end
@@ -1125,10 +1087,9 @@ module PNGGIF
     end
 
     # Reads *total* RGB color-table entries (3 bytes each) starting at *p* into
-    # *into* (opaque), returning the position just past the table. The caller is
-    # responsible for the truncation guard, so the in-bounds reads here can't run
-    # off the buffer. Shared by the global (constructor) and local (`parse_image`)
-    # color-table parsers.
+    # *into* (opaque), returning the position just past the table. Caller is
+    # responsible for the truncation guard. Shared by the global (constructor)
+    # and local (`parse_image`) color-table parsers.
     private def read_color_table(buf : Bytes, p : Int32, total : Int32, into : Array(Pixel)) : Int32
       total.times do
         into << Pixel.new(buf[p].to_i, buf[p + 1].to_i, buf[p + 2].to_i, 255)
@@ -1157,10 +1118,9 @@ module PNGGIF
 
     private def parse_extension(buf : Bytes, p : Int32) : Int32
       # The extension label and each fixed-size header below are read
-      # unconditionally; guard them like the image-descriptor / color-table
-      # checks elsewhere so a file truncated inside an extension raises a clean
-      # decode error instead of a raw IndexError. (`skip_subblocks` /
-      # `gather_subblocks` already self-guard their variable-length tails.)
+      # unconditionally; guard them so a file truncated inside an extension
+      # raises a clean decode error instead of a raw IndexError.
+      # (`skip_subblocks`/`gather_subblocks` self-guard their variable-length tails.)
       raise "bad gif: truncated extension" unless p < buf.size
       label = buf[p]
       p += 1
@@ -1209,8 +1169,7 @@ module PNGGIF
     # Concatenates a chain of GIF sub-blocks (each a length byte followed by that
     # many data bytes, terminated by a zero length) into a single `Bytes`.
     # Returns the gathered data and the position just past the terminator. Two
-    # passes avoid the per-sub-block `Array(UInt8)#concat` growth and the
-    # `to_unsafe` round-trip the previous inline loops used.
+    # passes avoid per-sub-block array growth.
     private def gather_subblocks(buf : Bytes, p : Int32) : Tuple(Bytes, Int32)
       total = 0
       q = p
@@ -1218,7 +1177,7 @@ module PNGGIF
         size = buf[q].to_i
         # A truncated trailing sub-block may claim more bytes than remain; count
         # (and below, copy) only what is actually present so `buf[...]` can't run
-        # off the end, mirroring the PNG parser's truncation guard.
+        # off the end.
         total += Math.min(size, buf.size - q - 1)
         q += 1 + size
       end
@@ -1240,22 +1199,17 @@ module PNGGIF
     private def parse_image(buf : Bytes, p : Int32) : Int32
       img = Image.new
       # The 9-byte image descriptor (offsets, size, flags) is read
-      # unconditionally below; guard it like the global/local color-table checks
-      # so a file truncated at/after the `0x2c` separator raises a clean decode
-      # error instead of a raw IndexError from the `u16`/`buf[p]` reads.
+      # unconditionally below; guard it so a file truncated at/after the `0x2c`
+      # separator raises a clean decode error instead of a raw IndexError.
       raise "bad gif image: truncated image descriptor" unless p + 9 <= buf.size
       img.left = u16(buf, p).to_i; p += 2
       img.top = u16(buf, p).to_i; p += 2
       img.width = u16(buf, p).to_i; p += 2
       img.height = u16(buf, p).to_i; p += 2
-      # width/height are each u16 (0..65535), so their product (the pixel count
-      # used below as `lzw_decompress`'s `expected` capacity and the interlaced
-      # sample-buffer size) can reach 65535² ≈ 4.29e9 and overflow Int32 for any
-      # frame with width*height > Int32::MAX (~46341²). Crystal's default
-      # overflow checking then makes `img.width * img.height` raise a raw
-      # OverflowError mid-decode. Reject it up front via an Int64 product like
-      # the IHDR-dimension guard on the PNG side, so an oversized frame fails as
-      # a clean decode error instead.
+      # width/height are each u16 (0..65535), so their product (pixel count, used
+      # below for `lzw_decompress`'s capacity and the interlaced sample buffer)
+      # can overflow Int32 for a frame with width*height > Int32::MAX (~46341²).
+      # Reject it up front via an Int64 product for a clean decode error.
       raise "bad gif image: dimensions #{img.width}x#{img.height} too large" if img.width.to_i64 * img.height.to_i64 > Int32::MAX
       flags = buf[p].to_i; p += 1
       lct = (flags & 0x80) != 0
@@ -1266,25 +1220,20 @@ module PNGGIF
       if lct
         table = [] of Pixel
         total = 1 << lctsize
-        # A truncated file may declare a local color table (up to 256×3 bytes)
-        # that runs past the buffer, mirroring the global color table guard in
-        # the constructor; without this the `buf[p]` reads below raise a raw
-        # IndexError instead of a clean decode error.
+        # A truncated file may declare a local color table (up to 256x3 bytes)
+        # that runs past the buffer, mirroring the global color table guard.
         raise "bad gif image: truncated local color table" unless p + total * 3 <= buf.size
         p = read_color_table(buf, p, total, table)
       end
 
       # The LZW minimum-code-size byte follows the (optional) local color table;
-      # guard it too, since a file truncated exactly here would otherwise read
-      # one byte past the end.
+      # guard it too, since truncation exactly here would read one byte past the end.
       raise "bad gif image: truncated image data" unless p < buf.size
       code_size = buf[p].to_i; p += 1
       # The GIF LZW minimum code size is 2..8 (the color-table bit depth). A
       # corrupt value drives `lzw_decompress`'s `cc = 1 << code_size`: e.g. ~30
-      # makes `cc` a billion and `cc.times { table << ... }` allocates until the
-      # process is OOM-killed, while >=31 wraps `cc` negative and corrupts the
-      # decode. Reject it up front like the other GIF header guards instead of
-      # letting one corrupt byte trigger unbounded allocation.
+      # makes `cc` a billion, OOM-killing the process via unbounded allocation;
+      # >=31 wraps `cc` negative and corrupts the decode. Reject it up front.
       raise "bad gif image: invalid LZW minimum code size #{code_size}" unless 2 <= code_size <= 8
       lzw, p = gather_subblocks(buf, p)
 
@@ -1304,19 +1253,17 @@ module PNGGIF
     # Maps one GIF color index to its `Pixel`: looks the index up in the active
     # (global or local) palette, falling back to transparent for an out-of-range
     # index, and clears alpha to 0 when the index is the graphic-control
-    # transparent color. Shared by the interlaced and non-interlaced bitmap
-    # builders so the lookup + color-key rule stays in one place.
+    # transparent color. Shared by the interlaced and non-interlaced builders.
     private def gif_color(table : Array(Pixel), b : Int32, transparent : Int32) : Pixel
       color = table[b]? || Pixel.new(0, 0, 0, 0)
       return Pixel.new(color.r, color.g, color.b, 0) if transparent >= 0 && b == transparent
       color
     end
 
-    # Packs a flat, row-major pixel sequence into a `Bitmap` of *h* rows × *w*
+    # Packs a flat, row-major pixel sequence into a `Bitmap` of *h* rows x *w*
     # columns, yielding each cell's flat index `0...(w*h)` and storing the
     # `Pixel` the block returns. Shared by the non-interlaced and (post-
-    # reassembly) interlaced GIF bitmap builders, whose row-packing loops are
-    # otherwise identical.
+    # reassembly) interlaced GIF bitmap builders.
     private def pack_pixel_rows(w : Int32, h : Int32, &) : Bitmap
       bmp = Bitmap.new(h)
       k = 0
@@ -1361,14 +1308,12 @@ module PNGGIF
         if col >= w
           col = 0
           row += interlacing[ilp][1]
-          # Skip *every* pass whose starting row is already past the image, not
+          # Skip every pass whose starting row is already past the image, not
           # just one. The four Adam7 passes start at rows 0, 4, 2, 1; for a short
-          # image several of those starts can exceed `h` at once (e.g. h<=4 makes
-          # pass 2's start of 4 empty). Advancing a single pass per row-overflow
-          # left `row` on an out-of-range pass, so that pass's whole row of
-          # indices was dropped (`pos >= samples.size`) and every later row landed
-          # in the wrong pass — scrambling/blanking short interlaced GIFs. Loop
-          # until `row` lands inside the image (or passes are exhausted).
+          # image several starts can exceed `h` at once. Advancing only one pass
+          # per overflow left `row` on an out-of-range pass, dropping that pass's
+          # row of indices and scrambling every later row. Loop until `row` lands
+          # inside the image (or passes are exhausted).
           while row >= h && ilp < interlacing.size - 1
             ilp += 1
             row = interlacing[ilp][0]
@@ -1381,10 +1326,9 @@ module PNGGIF
 
     # Builds the LZW dictionary in its initial / post-Clear state: `cc` literal
     # entries (each `{value, prev = -1, first = value}`) followed by two reserved
-    # slots for the Clear (cc) and EOI (cc+1) codes, so the array index stays in
-    # lockstep with `ntable` (which starts at cc+2) as new entries are appended.
-    # Shared by `lzw_decompress`'s up-front initialisation and its Clear-code
-    # handler, which must reset to byte-identical state.
+    # slots for the Clear (cc) and EOI (cc+1) codes, keeping the array index in
+    # lockstep with `ntable` (which starts at cc+2). Shared by `lzw_decompress`'s
+    # up-front init and its Clear-code handler, which must reset identically.
     private def lzw_init_table(cc : Int32) : Array(Tuple(Int32, Int32, Int32))
       table = [] of Tuple(Int32, Int32, Int32)
       cc.times { |i| table << {i, -1, i} }
@@ -1395,9 +1339,8 @@ module PNGGIF
 
     # Pushes the byte string for dictionary entry *code* onto *stack* by walking
     # the entry's prev-pointer chain back to its root literal. The chain yields
-    # the bytes in reverse, so the caller pops them off `stack` to emit forward
-    # order. Shared by `lzw_decompress`'s two emit branches (the in-table code
-    # and the KwKwK case), whose walk is otherwise byte-for-byte identical.
+    # bytes in reverse, so the caller pops them off `stack` for forward order.
+    # Shared by `lzw_decompress`'s two emit branches (in-table code, KwKwK case).
     private def lzw_push_string(stack : Array(Int32), table : Array(Tuple(Int32, Int32, Int32)), code : Int32)
       i = code
       while i >= 0
@@ -1416,11 +1359,9 @@ module PNGGIF
       stack = [] of Int32
       # Initialise the dictionary to its post-Clear state up front. A
       # spec-conformant stream opens with a Clear code, whose handler below
-      # reinitialises `table`/`ntable`/`max_elem` identically, so valid input is
-      # unaffected. But a corrupt stream that omits that leading Clear would
-      # otherwise reach the `old_code == -1` literal path (or the code lookups
-      # below) with `table` still empty and raise a raw IndexError instead of
-      # decoding as gracefully as the rest of the decoder handles bad input.
+      # reinitialises identically, so valid input is unaffected. A corrupt
+      # stream omitting that leading Clear would otherwise hit the
+      # `old_code == -1` path with `table` empty and raise a raw IndexError.
       table = lzw_init_table(cc)
       ntable = cc + 2
       old_code = -1
@@ -1464,8 +1405,8 @@ module PNGGIF
           if old_code == -1
             # The first data code must reference an existing dictionary entry
             # (a literal, < cc). A corrupt stream whose first code lands in the
-            # not-yet-defined range [cc+2, max_elem) would index `table` (size
-            # cc+2) past its end; stop cleanly like the truncation return above.
+            # not-yet-defined range [cc+2, max_elem) would index `table` past
+            # its end; stop cleanly instead.
             break if code >= ntable
             old_code = code
             buf << table[code][0]
@@ -1480,8 +1421,7 @@ module PNGGIF
             # `code >= ntable`: only `code == ntable` is valid (the KwKwK case,
             # resolved by the entry appended just below). A corrupt `code >
             # ntable` references an entry that still won't exist after the
-            # append, so the `table[code]` walk would raise IndexError — bail
-            # out gracefully instead, matching the decoder's bad-input handling.
+            # append, so `table[code]` would raise IndexError — bail out instead.
             break if code > ntable
             k = table[old_code][2]
             table << {k, old_code, k}
