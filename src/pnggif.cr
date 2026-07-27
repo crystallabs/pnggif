@@ -92,7 +92,7 @@ module PNGGIF
   # Decodes a PNG / APNG / GIF (or, via ImageMagick, JPEG/other) image into:
   #
   # * `#bmp`     — the full-resolution RGBA bitmap of the first frame
-  # * `#cellmap` — `bmp` downscaled to terminal-cell resolution
+  # * `#cellmap` — `bmp` downscaled to terminal-cell resolution (built lazily)
   # * `#frames`  — animation frames (APNG / animated GIF), or `nil` if static
   #
   # The cellmap is for solid-block terminal rendering (one cell per sampled
@@ -106,7 +106,8 @@ module PNGGIF
     getter bit_depth : Int32 = 8
     getter color_type : Int32 = 6
     getter! bmp : Bitmap
-    getter cellmap : Bitmap = Bitmap.new
+    # Backing store for the lazily-built `#cellmap`; `nil` until first read.
+    @cellmap : Bitmap? = nil
     getter frames : Array(Frame)?
     getter num_plays : Int32 = 0
     # Full canvas dimensions (IHDR / GIF logical screen), which stay fixed even
@@ -197,7 +198,6 @@ module PNGGIF
       end
       @bmp = fr.first.bmp
       @frames = fr
-      @cellmap = create_cellmap bmp
     end
 
     private def detect_format(buf : Bytes) : String
@@ -226,8 +226,6 @@ module PNGGIF
       @frames = build_apng_frames
       @width = @canvas_width
       @height = @canvas_height
-
-      @cellmap = create_cellmap bmp
     end
 
     private def parse_chunks(buf : Bytes)
@@ -768,6 +766,18 @@ module PNGGIF
 
     # ---------------------------------------------------------------- cellmap
 
+    # `#bmp` downscaled to terminal-cell resolution, using the rendering knobs
+    # (`cell_width`/`cell_height`/`scale`/`cell_aspect`) as they stand on the
+    # first read. Built on demand and then memoized: most consumers resample
+    # explicitly via `#create_cellmap` / `#animation_cellmaps` and never touch
+    # this, so computing it at construction meant a full nearest-neighbour
+    # resample (and a `w × h/2` bitmap allocation) that was immediately garbage
+    # on every decode. Mutating a knob after the first read does not invalidate
+    # the memo.
+    def cellmap : Bitmap
+      @cellmap ||= create_cellmap bmp
+    end
+
     # Downscales *bmp* to terminal-cell resolution by nearest-neighbour
     # sampling. Honours `cmwidth`/`cmheight` if given, else `scale` (all
     # defaulting to the values supplied at construction).
@@ -777,7 +787,14 @@ module PNGGIF
     # result isn't vertically stretched on non-square cells (terminal cells are
     # ~2x taller than wide). When both `cmwidth` and `cmheight` are given, they
     # are used verbatim.
-    def create_cellmap(bmp : Bitmap, cmwidth : Int32? = @cell_width, cmheight : Int32? = @cell_height, scale : Float64 = @scale, cell_aspect : Float64 = @cell_aspect) : Bitmap
+    #
+    # *into* is an optional reusable destination: it is resized in place to the
+    # target dimensions and every cell overwritten, so a caller re-sampling
+    # every animation frame allocates nothing once the buffer is warm. The
+    # caller owns the buffer — the returned Bitmap *is* *into*, valid only
+    # until the caller reuses it. Empty inputs still return a fresh empty
+    # Bitmap so an *into* buffer is never truncated by a degenerate call.
+    def create_cellmap(bmp : Bitmap, cmwidth : Int32? = @cell_width, cmheight : Int32? = @cell_height, scale : Float64 = @scale, cell_aspect : Float64 = @cell_aspect, into : Bitmap? = nil) : Bitmap
       return Bitmap.new if bmp.empty? || bmp[0].empty?
       height = bmp.size
       width = bmp[0].size
@@ -798,6 +815,26 @@ module PNGGIF
 
       ys = height / cmheight
       xs = width / cmwidth
+
+      if into
+        resize_bitmap into, cmwidth, cmheight
+        y = 0.0
+        cmheight.times do |cy|
+          yy = y.round.to_i
+          yy = height - 1 if yy >= height
+          row = bmp[yy]? || break
+          line = into[cy]
+          x = 0.0
+          cmwidth.times do |cx|
+            xx = x.round.to_i
+            xx = width - 1 if xx >= width
+            line[cx] = row[xx]? || Pixel.new(0, 0, 0, 0)
+            x += xs
+          end
+          y += ys
+        end
+        return into
+      end
 
       cellmap = Bitmap.new(cmheight)
       y = 0.0
@@ -821,6 +858,26 @@ module PNGGIF
         y += ys
       end
       cellmap
+    end
+
+    # Brings *bmp* to exactly *width* × *height* in place — dropping/adding
+    # rows and shrinking/growing each row — reusing every surviving row array.
+    # Cell contents are left as-is (grown cells are transparent); callers
+    # overwrite them. The reuse half of `create_cellmap`'s *into* support.
+    private def resize_bitmap(bmp : Bitmap, width : Int32, height : Int32) : Nil
+      if bmp.size > height
+        bmp.delete_at(height, bmp.size - height)
+      end
+      bmp.each do |row|
+        if row.size > width
+          row.delete_at(width, row.size - width)
+        elsif row.size < width
+          (width - row.size).times { row << Pixel.new(0, 0, 0, 0) }
+        end
+      end
+      while bmp.size < height
+        bmp << Array(Pixel).new(width, Pixel.new(0, 0, 0, 0))
+      end
     end
 
     # ---------------------------------------------------------------- animation
@@ -979,7 +1036,6 @@ module PNGGIF
         @num_plays = gif.num_plays
         @frames = frames
       end
-      @cellmap = create_cellmap bmp
     end
 
     # ------------------------------------------------------- foreign formats
