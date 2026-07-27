@@ -88,8 +88,8 @@ describe PNGGIF::PNG do
       bytes = PNGGIF.encode_apng([{solid_bitmap(2, 2, 1, 2, 3), 1001}])
       png = PNGGIF::PNG.new(bytes)
       frames = png.frames
-      frames.should_not be_nil
-      frames.not_nil!.first.delay.should eq 1001
+      fail "expected frames" unless frames
+      frames.first.delay.should eq 1001
     end
   end
 

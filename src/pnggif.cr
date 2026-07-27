@@ -1,5 +1,6 @@
 require "compress/zlib"
 require "./encode"
+require "./raster"
 
 # Pure-Crystal PNG / APNG / GIF reader.
 #
@@ -1138,7 +1139,7 @@ module PNGGIF
         p = read_color_table(buf, p, total, @colors)
       end
 
-      p = parse_blocks(buf, p)
+      parse_blocks(buf, p)
       raise "no image data or bad decompress" if @images.empty?
     end
 
