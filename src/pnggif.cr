@@ -1,6 +1,8 @@
 require "compress/zlib"
 require "./encode"
 require "./raster"
+require "./painter"
+require "./video_source"
 
 # Pure-Crystal PNG / APNG / GIF reader.
 #
