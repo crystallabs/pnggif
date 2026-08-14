@@ -14,3 +14,7 @@ jobs:
         run: shards install
       - name: Build
         run: crystal build --no-codegen src/pnggif.cr src/encode.cr
+      - name: Run ameba
+        run: |
+          shards build ameba
+          ./bin/ameba

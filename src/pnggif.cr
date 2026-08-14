@@ -352,7 +352,7 @@ module PNGGIF
     end
 
     private def build_apng_frames : Array(Frame)?
-      return nil if @raw_frames.empty? || @actl.nil?
+      return if @raw_frames.empty? || @actl.nil?
 
       frames = [] of Frame
       @raw_frames.each do |rf|
@@ -891,7 +891,7 @@ module PNGGIF
     # `renderFrame` / `compileFrames`.
     def animation_cellmaps(cmwidth : Int32? = @cell_width, cmheight : Int32? = @cell_height, scale : Float64 = @scale) : Array(Tuple(Bitmap, Int32))?
       fr = @frames
-      return nil if fr.nil? || fr.empty?
+      return if fr.nil? || fr.empty?
 
       canvas = Array.new(@canvas_height) { Array.new(@canvas_width) { Pixel.new(0, 0, 0, 0) } }
       result = [] of Tuple(Bitmap, Int32)
@@ -1049,7 +1049,7 @@ module PNGGIF
       status = Process.run("convert", ["-", "png:-"], input: IO::Memory.new(input), output: stdout, error: Process::Redirect::Close)
       raise "cannot decode image: ImageMagick `convert` failed or is not installed" unless status.success?
       stdout.to_slice
-    rescue ex : File::NotFoundError | RuntimeError
+    rescue File::NotFoundError | RuntimeError
       raise "cannot decode image: install ImageMagick (`convert`) for non-PNG/GIF formats"
     end
 

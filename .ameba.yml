@@ -1,5 +1,5 @@
 # Ameba configuration for pnggif.
-# Run with: ./bin/ameba
+# Run with: ./bin/ameba   (binary built by `shards build ameba`)
 #
 # Most defaults are kept. The exceptions below are deliberate: they reflect the
 # nature of an image codec (inherently branchy decode loops, short coordinate
