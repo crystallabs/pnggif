@@ -109,3 +109,27 @@ describe PNGGIF::PNG do
     end
   end
 end
+
+describe "PNGGIF::PNG#create_cellmap" do
+  # A one-column bitmap whose red channel is the row index.
+  column = ->(h : Int32) do
+    PNGGIF::Bitmap.new(h) { |y| [PNGGIF::Pixel.new(y, 0, 0)] }
+  end
+  png = PNGGIF::PNG.new(PNGGIF.encode_png(solid_bitmap(1, 1, 0, 0, 0)))
+
+  it "samples each cell at its centre when shrinking, reaching the last rows" do
+    cm = png.create_cellmap(column.call(4), 1, 2)
+    cm.map(&.first.r).should eq [1, 3]
+    png.create_cellmap(column.call(4), 1, 2, into: PNGGIF::Bitmap.new).map(&.first.r).should eq [1, 3]
+  end
+
+  it "samples each cell at its centre when growing, each source row covering as many cells" do
+    png.create_cellmap(column.call(2), 1, 4).map(&.first.r).should eq [0, 0, 1, 1]
+    png.create_cellmap(column.call(3), 1, 6, into: PNGGIF::Bitmap.new).map(&.first.r).should eq [0, 0, 1, 1, 2, 2]
+  end
+
+  it "samples columns the same way" do
+    row = PNGGIF::Bitmap.new(1) { Array(PNGGIF::Pixel).new(6) { |x| PNGGIF::Pixel.new(x, 0, 0) } }
+    png.create_cellmap(row, 3, 1).first.map(&.r).should eq [1, 3, 5]
+  end
+end

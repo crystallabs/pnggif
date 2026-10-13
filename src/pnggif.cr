@@ -821,46 +821,31 @@ module PNGGIF
 
       if into
         resize_bitmap into, cmwidth, cmheight
-        y = 0.0
         cmheight.times do |cy|
-          yy = y.round.to_i
-          yy = height - 1 if yy >= height
-          row = bmp[yy]? || break
+          row = bmp[sample_index(cy, ys, height)]
           line = into[cy]
-          x = 0.0
           cmwidth.times do |cx|
-            xx = x.round.to_i
-            xx = width - 1 if xx >= width
-            line[cx] = row[xx]? || Pixel.new(0, 0, 0, 0)
-            x += xs
+            line[cx] = row[sample_index(cx, xs, width)]? || Pixel.new(0, 0, 0, 0)
           end
-          y += ys
         end
         return into
       end
 
-      cellmap = Bitmap.new(cmheight)
-      y = 0.0
-      # Emit exactly cmheight x cmwidth cells. The sample positions step by
-      # `ys`/`xs`, but the index is clamped to the last valid row/column instead
-      # of breaking: when upscaling, the final step rounds to `height`/`width`,
-      # which previously dropped the last row/column.
-      cmheight.times do
-        yy = y.round.to_i
-        yy = height - 1 if yy >= height
-        row = bmp[yy]? || break
-        line = Array(Pixel).new(cmwidth)
-        x = 0.0
-        cmwidth.times do
-          xx = x.round.to_i
-          xx = width - 1 if xx >= width
-          line << (row[xx]? || Pixel.new(0, 0, 0, 0))
-          x += xs
+      # Emit exactly cmheight x cmwidth cells.
+      Bitmap.new(cmheight) do |cy|
+        row = bmp[sample_index(cy, ys, height)]
+        Array(Pixel).new(cmwidth) do |cx|
+          row[sample_index(cx, xs, width)]? || Pixel.new(0, 0, 0, 0)
         end
-        cellmap << line
-        y += ys
       end
-      cellmap
+    end
+
+    # The source index an output cell *i* samples, *step* source pixels to a
+    # cell: the pixel under the cell's centre, so the picture neither shifts
+    # by half a cell towards the top left nor, when shrinking, leaves out its
+    # last rows/columns. Clamped to the last of *size*.
+    private def sample_index(i : Int32, step : Float64, size : Int32) : Int32
+      Math.min(((i + 0.5) * step).to_i, size - 1)
     end
 
     # Brings *bmp* to exactly *width* × *height* in place — dropping/adding
