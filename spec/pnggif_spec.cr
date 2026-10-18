@@ -39,9 +39,19 @@ describe PNGGIF::PNG do
       png.height.should eq 2
     end
 
+    it "decodes a JPEG through ImageMagick when it is installed" do
+      pending! "ImageMagick not installed" unless PNGGIF::PNG::IMAGEMAGICK.any? { |c| Process.find_executable(c) }
+      png = PNGGIF::PNG.new(File.join(__DIR__, "fixtures", "rgb8.jpg"))
+      png.width.should eq 9
+      png.height.should eq 7
+      # Lossy, but a 9x7 near-flat gradient stays close to the source.
+      want = PNGGIF::PNG.new(File.join(__DIR__, "fixtures", "rgb8.png")).bmp
+      (png.bmp[3][4].r - want[3][4].r).abs.should be < 40
+    end
+
     it "raises for a buffer that is neither PNG nor GIF and cannot be converted" do
-      # No real image; ImageMagick `convert` (if present) also rejects it, so
-      # either branch ends in the same "cannot decode image" failure.
+      # No real image; ImageMagick (if present) also rejects it, so either
+      # branch ends in the same "cannot decode image" failure.
       expect_raises(Exception, /cannot decode image/) do
         PNGGIF::PNG.new(Bytes[0x00, 0x01, 0x02, 0x03, 0x04])
       end

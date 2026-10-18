@@ -12,8 +12,8 @@ require "./video_source"
 # shard so it can be reused independently of the TUI toolkit.
 #
 # PNG decompression uses Crystal's stdlib `Compress::Zlib`; GIF uses a ported
-# LZW decoder. JPEG and other formats are converted to PNG via ImageMagick's
-# `convert` if it is available.
+# LZW decoder. JPEG and other formats are converted to PNG via ImageMagick
+# (`magick` or `convert`) if it is available.
 module PNGGIF
   VERSION = "0.1.2"
 
@@ -931,14 +931,19 @@ module PNGGIF
 
     # ------------------------------------------------------- foreign formats
 
+    # ImageMagick command names, in order of preference: `magick` is
+    # ImageMagick 7's entry point (which no longer always installs the legacy
+    # names), `convert` is ImageMagick 6's.
+    IMAGEMAGICK = {"magick", "convert"}
+
     # Converts a non-PNG/GIF buffer (JPEG, BMP, ...) to PNG via ImageMagick.
     private def to_png(input : Bytes) : Bytes
+      cmd = IMAGEMAGICK.find { |name| Process.find_executable(name) }
+      raise "cannot decode image: install ImageMagick (`magick` or `convert`) for non-PNG/GIF formats" unless cmd
       stdout = IO::Memory.new
-      status = Process.run("convert", ["-", "png:-"], input: IO::Memory.new(input), output: stdout, error: Process::Redirect::Close)
-      raise "cannot decode image: ImageMagick `convert` failed or is not installed" unless status.success?
+      status = Process.run(cmd, ["-", "png:-"], input: IO::Memory.new(input), output: stdout, error: Process::Redirect::Close)
+      raise "cannot decode image: ImageMagick `#{cmd}` could not convert it" unless status.success?
       stdout.to_slice
-    rescue File::NotFoundError | RuntimeError
-      raise "cannot decode image: install ImageMagick (`convert`) for non-PNG/GIF formats"
     end
 
     # ------------------------------------------------------------- decompress

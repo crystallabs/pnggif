@@ -17,7 +17,8 @@ Ported from [Blessed](https://github.com/chjj/blessed)'s bundled
 - **APNG**: animation frames with dispose/blend compositing.
 - **GIF** (87a/89a): ported LZW decoder, interlacing, transparency, NETSCAPE
   loop counts, multi-frame animation.
-- **JPEG / other**: converted to PNG via ImageMagick `convert` when available.
+- **JPEG / other**: converted to PNG via ImageMagick (`magick`, or the
+  ImageMagick 6 `convert`) when available.
 - **Cellmaps**: nearest-neighbour downscaling with non-square-cell **aspect
   correction** (`cell_aspect`, default `2.0`) so images don't look stretched.
 - **Encoding**: still **PNG** and animated **APNG** written in-process, no
