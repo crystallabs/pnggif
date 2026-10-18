@@ -56,7 +56,7 @@ describe "PNG fixtures" do
 
   it "applies palette transparency" do
     bmp = fixture("pal8a_i").bmp
-    bmp.flat_map(&.map(&.a)).uniq.size.should be > 1
+    bmp.flat_map(&.map(&.a)).uniq!.size.should be > 1
   end
 
   it "applies truecolor and grayscale colour-key transparency" do

@@ -385,8 +385,7 @@ module PNGGIF
     # returning the position just past the consumed `1 + line.size` bytes.
     # `pos` must be `< data.size`; the copy is clamped with `Math.min` so a
     # truncated final line can't read past the buffer, and any short tail is
-    # zero-filled. Shared by the non-interlaced `decode_image` loop and
-    # `sample_interlaced_lines`.
+    # zero-filled. Shared by `decode_progressive` and `decode_interlaced`.
     private def read_scanline(data : Bytes, pos : Int32, line : Bytes, prior : Bytes) : Int32
       filter = data[pos].to_i
       pos += 1
@@ -413,39 +412,81 @@ module PNGGIF
                       else        1 # 0 (gray) and 3 (palette)
                       end
       @bits_per_pixel = @bit_depth * @sample_depth
-      @bytes_per_pixel = (@bits_per_pixel / 8.0).ceil.to_i
-      @byte_width = (@width * (@bits_per_pixel / 8.0)).ceil.to_i
+      @bytes_per_pixel = (@bits_per_pixel + 7) // 8
+      @byte_width = row_bytes(@width)
     end
 
-    # Decodes the IDAT/fdAT byte stream straight into a `Bitmap`. The
-    # non-interlaced path is fully fused: each unfiltered scanline converts
-    # directly into a row of `Pixel`s, avoiding a full-image samples buffer.
-    # Adam7 interlacing needs random-access reassembly, so it keeps the
-    # `sample_interlaced_lines` -> `create_bitmap` route.
+    # Bytes an unfiltered scanline of *pixels* pixels occupies at the image's
+    # bits-per-pixel, rounded up to whole bytes (sub-byte depths pack
+    # MSB-first, with the last byte's remaining bits unused).
+    private def row_bytes(pixels : Int32) : Int32
+      n = (pixels.to_i64 * @bits_per_pixel + 7) // 8
+      raise "bad png: image too wide" if n > Int32::MAX
+      n.to_i
+    end
+
+    # Adam7 interlace passes as `{xstart, ystart, xstep, ystep}`.
+    ADAM7 = { {0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0, 2, 2, 4}, {1, 0, 2, 2}, {0, 1, 1, 2} }
+
+    # Decodes the IDAT/fdAT byte stream straight into a `Bitmap` of exactly
+    # `@height` rows × `@width` pixels. Each unfiltered scanline converts
+    # directly into `Pixel`s via `build_pixel_row` (no full-image samples
+    # buffer); the Adam7 path scatters each pass line's pixels into place.
+    # Rows/pixels a truncated stream never reaches are left transparent.
     private def decode_image(data : Bytes) : Bitmap
       compute_metrics
-      if @interlace == 1
-        bmp = create_bitmap(sample_interlaced_lines(data))
-        apply_color_trns bmp if @trns
-        return bmp
-      end
+      bmp = @interlace == 1 ? decode_interlaced(data) : decode_progressive(data)
+      apply_color_trns bmp if @trns
+      bmp
+    end
 
-      rows = Bitmap.new(@height > 0 ? @height : 0)
-      return rows if @width <= 0
-
+    private def decode_progressive(data : Bytes) : Bitmap
+      rows = Bitmap.new(@height)
       # Two reusable buffers swapped each scanline (this line / previous line)
       # instead of allocating a fresh Bytes per row.
-      buf_a = Bytes.new(@byte_width, 0u8)
-      buf_b = Bytes.new(@byte_width, 0u8)
-      prior = buf_a
-      line = buf_b
-      p = 0
-      while p < data.size
-        p = read_scanline(data, p, line, prior)
-        rows << build_pixel_row(line)
+      prior = Bytes.new(@byte_width)
+      line = Bytes.new(@byte_width)
+      pos = 0
+      # Bounded by `@height`: a stream carrying more scanlines than IHDR
+      # declares used to grow `bmp` past `#height`.
+      while rows.size < @height && pos < data.size
+        pos = read_scanline(data, pos, line, prior)
+        rows << build_pixel_row(line, @width)
         prior, line = line, prior
       end
-      apply_color_trns rows if @trns
+      while rows.size < @height
+        rows << Array(Pixel).new(@width, Pixel.new(0, 0, 0, 0))
+      end
+      rows
+    end
+
+    # Adam7 deinterlacing: each pass is a sequence of independently filtered
+    # reduced-image scanlines (`ppr` pixels wide), whose pixels land on the
+    # canvas at `(xstart + k*xstep, y)`.
+    private def decode_interlaced(data : Bytes) : Bitmap
+      rows = Bitmap.new(@height) { Array(Pixel).new(@width, Pixel.new(0, 0, 0, 0)) }
+      pos = 0
+      ADAM7.each do |(xstart, ystart, xstep, ystep)|
+        next if xstart >= @width || ystart >= @height
+        ppr = (@width - xstart + xstep - 1) // xstep
+        size = row_bytes(ppr)
+        # Fresh (zeroed) buffers per pass: the first line of every pass
+        # unfilters against a zero prior.
+        prior = Bytes.new(size)
+        line = Bytes.new(size)
+        y = ystart
+        while y < @height && pos < data.size
+          pos = read_scanline(data, pos, line, prior)
+          dest = rows[y]
+          x = xstart
+          build_pixel_row(line, ppr).each do |px|
+            dest[x] = px
+            x += xstep
+          end
+          prior, line = line, prior
+          y += ystep
+        end
+      end
       rows
     end
 
@@ -484,14 +525,14 @@ module PNGGIF
       end
     end
 
-    # Converts one unfiltered scanline into a row of `Pixel`s. Colour type and
-    # bit depth are constant for the image, so the common 8-bit case gets a
-    # tight branch reading bytes straight out of `line`; other depths fall back
-    # to `raw_sample` + `sample_to_8bit`. Palette indices (type 3) are used raw.
-    private def build_pixel_row(line : Bytes) : Array(Pixel)
-      w = @width
+    # Converts one unfiltered scanline of *w* pixels into a row of `Pixel`s.
+    # Colour type and bit depth are constant for the image, so the common
+    # 8-bit case gets a tight branch reading bytes straight out of `line`;
+    # other depths fall back to `raw_sample` + `sample_to_8bit`. Palette
+    # indices (type 3) are used raw.
+    private def build_pixel_row(line : Bytes, w : Int32) : Array(Pixel)
       eight = @bit_depth == 8
-      # `line` is exactly `@byte_width` bytes, so every 8-bit indexed read below
+      # `line` is exactly `row_bytes(w)` bytes, so every 8-bit indexed read below
       # stays in bounds and can skip the per-byte bounds check via the raw pointer.
       src = line.to_unsafe
 
@@ -609,42 +650,6 @@ module PNGGIF
       c
     end
 
-    # Unpacks one scanline into integer samples (one per channel), appending to
-    # *out*. Values stay in their bit-depth's native range; `#sample_to_8bit`
-    # scales them later.
-    private def sample_line_into(dest : Array(Int32), line : Bytes, width : Int32)
-      total = width * @sample_depth
-      case @bit_depth
-      when 16
-        i = 0
-        cnt = 0
-        while cnt < total && i + 1 < line.size
-          dest << ((line[i].to_i << 8) | line[i + 1].to_i)
-          i += 2
-          cnt += 1
-        end
-      when 8
-        cnt = 0
-        while cnt < total && cnt < line.size
-          dest << line[cnt].to_i
-          cnt += 1
-        end
-      else
-        bits = @bit_depth
-        mask = (1 << bits) - 1
-        cnt = 0
-        line.each do |byte|
-          shift = 8 - bits
-          while shift >= 0 && cnt < total
-            dest << ((byte.to_i >> shift) & mask)
-            shift -= bits
-            cnt += 1
-          end
-          break if cnt >= total
-        end
-      end
-    end
-
     # Scales a raw sample to 0..255 (no-op for palette indices, handled by caller).
     private def sample_to_8bit(v : Int32) : Int32
       case @bit_depth
@@ -654,118 +659,6 @@ module PNGGIF
         mask = (1 << @bit_depth) - 1
         (v * 255) // mask
       end
-    end
-
-    # Color type is constant for the image, so it's dispatched once here rather
-    # than per pixel. Each branch unpacks `@sample_depth` samples into one Pixel
-    # and flushes a row every `w` pixels; a trailing partial row is appended at
-    # the end.
-    private def create_bitmap(samples : Array(Int32)) : Bitmap
-      rows = Bitmap.new
-      w = @width
-      return rows if w <= 0
-
-      sd = @sample_depth
-      n = samples.size
-      row = Array(Pixel).new(w)
-      i = 0
-      case @color_type
-      when 0 # grayscale
-        while i < n
-          v = sample_to_8bit samples[i]
-          row << Pixel.new(v, v, v, 255)
-          i += sd
-          if row.size == w
-            rows << row; row = Array(Pixel).new(w)
-          end
-        end
-      when 2 # RGB
-        while i < n
-          row << Pixel.new(sample_to_8bit(samples[i]), sample_to_8bit(samples[i + 1]), sample_to_8bit(samples[i + 2]), 255)
-          i += sd
-          if row.size == w
-            rows << row; row = Array(Pixel).new(w)
-          end
-        end
-      when 3 # palette index
-        while i < n
-          row << (@palette[samples[i]]? || Pixel.new(0, 0, 0, 0))
-          i += sd
-          if row.size == w
-            rows << row; row = Array(Pixel).new(w)
-          end
-        end
-      when 4 # grayscale + alpha
-        while i < n
-          v = sample_to_8bit samples[i]
-          row << Pixel.new(v, v, v, sample_to_8bit(samples[i + 1]))
-          i += sd
-          if row.size == w
-            rows << row; row = Array(Pixel).new(w)
-          end
-        end
-      when 6 # RGBA
-        while i < n
-          row << Pixel.new(sample_to_8bit(samples[i]), sample_to_8bit(samples[i + 1]), sample_to_8bit(samples[i + 2]), sample_to_8bit(samples[i + 3]))
-          i += sd
-          if row.size == w
-            rows << row; row = Array(Pixel).new(w)
-          end
-        end
-      end
-      rows << row unless row.empty?
-      rows
-    end
-
-    # Adam7 deinterlacing, ported from tng.js (originally from PyPNG, MIT).
-    private def sample_interlaced_lines(raw : Bytes) : Array(Int32)
-      adam7 = [{0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0, 2, 2, 4}, {1, 0, 2, 2}, {0, 1, 1, 2}]
-      psize = (@bit_depth / 8.0) * @sample_depth
-      # `vpr` (samples per row) and the flat `vpr * @height` sample buffer are
-      # Int32 products; for a large interlaced image these can exceed Int32 and
-      # raise a raw OverflowError mid-decode (the non-interlaced path streams
-      # row-by-row and is immune). Reject the oversized case up front via an
-      # Int64 product for a clean decode error instead.
-      raise "bad png: interlaced image too large" if @width.to_i64 * @sample_depth * @height > Int32::MAX
-      vpr = @width * @sample_depth
-      samples = Array(Int32).new(vpr * @height, 0)
-      source = 0
-
-      adam7.each do |(xstart, ystart, xstep, ystep)|
-        next if xstart >= @width
-        ppr = ((@width - xstart) / xstep).ceil.to_i
-        next if ppr <= 0
-        row_size = (psize * ppr).ceil.to_i
-        recon = Bytes.new(row_size, 0u8)
-        y = ystart
-        while y < @height
-          break if source >= raw.size
-          line = Bytes.new(row_size, 0u8)
-          source = read_scanline(raw, source, line, recon)
-          recon = line
-          flat = [] of Int32
-          sample_line_into flat, line, ppr
-          if xstep == 1
-            offset = y * vpr
-            (0...vpr).each { |f| samples[offset + f] = flat[f]? || 0 }
-          else
-            offset = y * vpr + xstart * @sample_depth
-            endo = (y + 1) * vpr
-            skip = @sample_depth * xstep
-            (0...@sample_depth).each do |jj|
-              k = offset + jj
-              f = jj
-              while k < endo
-                samples[k] = flat[f]? || 0
-                k += skip
-                f += @sample_depth
-              end
-            end
-          end
-          y += ystep
-        end
-      end
-      samples
     end
 
     # ---------------------------------------------------------------- cellmap

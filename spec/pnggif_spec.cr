@@ -141,3 +141,27 @@ describe "PNGGIF::PNG IHDR validation" do
     expect_raises(Exception, /invalid color type/) { PNGGIF::PNG.new(bytes) }
   end
 end
+
+describe "PNGGIF::PNG truncated and overlong image data" do
+  # A 3x2 RGBA PNG whose IHDR height is patched (the decoder ignores CRCs).
+  patched = ->(height : UInt8) do
+    bytes = PNGGIF.encode_png(sample_bitmap(3, 2))
+    bytes[8 + 8 + 7] = height # low byte of the IHDR height field
+    PNGGIF::PNG.new(bytes)
+  end
+
+  it "always decodes exactly `height` rows, padding missing ones transparent" do
+    png = patched.call(4_u8)
+    png.height.should eq 4
+    png.bmp.size.should eq 4
+    png.bmp[1][2].a.should eq 255
+    png.bmp[2].map(&.a).should eq [0, 0, 0]
+    png.bmp[3].size.should eq 3
+  end
+
+  it "ignores scanlines beyond the declared height" do
+    png = patched.call(1_u8)
+    png.height.should eq 1
+    png.bmp.size.should eq 1
+  end
+end
