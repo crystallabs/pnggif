@@ -133,3 +133,11 @@ describe "PNGGIF::PNG#create_cellmap" do
     png.create_cellmap(row, 3, 1).first.map(&.r).should eq [1, 3, 5]
   end
 end
+
+describe "PNGGIF::PNG IHDR validation" do
+  it "raises a clean error for an invalid color type" do
+    bytes = PNGGIF.encode_png(solid_bitmap(1, 1, 0, 0, 0))
+    bytes[8 + 8 + 9] = 5_u8 # IHDR colour-type byte
+    expect_raises(Exception, /invalid color type/) { PNGGIF::PNG.new(bytes) }
+  end
+end

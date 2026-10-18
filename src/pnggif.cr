@@ -270,6 +270,10 @@ module PNGGIF
           # mid-row instead of a clean decode error.
           raise "bad png: invalid bit depth #{@bit_depth}" unless {1, 2, 4, 8, 16}.includes?(@bit_depth)
           @color_type = data[9].to_i
+          # Likewise only {0,2,3,4,6} are valid colour types. An unknown type
+          # used to decode into rows of *zero* pixels, leaving `bmp[0].size`
+          # disagreeing with `#width` and every consumer indexing past it.
+          raise "bad png: invalid color type #{@color_type}" unless {0, 2, 3, 4, 6}.includes?(@color_type)
           @compression = data[10].to_i
           @filter = data[11].to_i
           @interlace = data[12].to_i
@@ -403,12 +407,10 @@ module PNGGIF
 
     private def compute_metrics
       @sample_depth = case @color_type
-                      when 0 then 1
                       when 2 then 3
-                      when 3 then 1
                       when 4 then 2
                       when 6 then 4
-                      else        1
+                      else        1 # 0 (gray) and 3 (palette)
                       end
       @bits_per_pixel = @bit_depth * @sample_depth
       @bytes_per_pixel = (@bits_per_pixel / 8.0).ceil.to_i
@@ -554,8 +556,7 @@ module PNGGIF
           end
         end
       else
-        # Unknown/invalid color type: preserve the old empty-row result.
-        Array(Pixel).new(w)
+        raise "bad png: invalid color type #{@color_type}" # rejected at IHDR; unreachable
       end
     end
 
