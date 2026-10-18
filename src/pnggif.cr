@@ -15,7 +15,7 @@ require "./video_source"
 # LZW decoder. JPEG and other formats are converted to PNG via ImageMagick
 # (`magick` or `convert`) if it is available.
 module PNGGIF
-  VERSION = "0.1.2"
+  VERSION = "0.1.3"
 
   # A single RGBA pixel. Channels are 0..255; `a` is opacity (255 = opaque).
   #
