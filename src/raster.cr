@@ -68,10 +68,10 @@ module PNGGIF
       reuse = !into.nil? && grid_fits?(into, pw, ph)
       out = (reuse ? into : nil) || Array(Array(V)).new(ph)
       ph.times do |y|
-        rin = bmp[y]
+        rin = bmp[y]?
         row = reuse ? out.unsafe_fetch(y) : Array(V).new(pw, transparent)
         pw.times do |x|
-          px = rin[x]?
+          px = rin.try &.[x]?
           if px.nil? || px.a == 0
             row[x] = transparent
             next

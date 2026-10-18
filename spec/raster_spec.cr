@@ -34,3 +34,13 @@ describe PNGGIF::Raster do
     end
   end
 end
+
+describe "PNGGIF::Raster.dither_rgb" do
+  it "treats missing rows and pixels as transparent" do
+    bmp = solid_bitmap(2, 1, 10, 20, 30)
+    out = PNGGIF::Raster.dither_rgb(bmp, 3, 2, PNGGIF::Raster::Dither::None, false, -1) do |r, g, b, _t|
+      {(r << 16) | (g << 8) | b, r, g, b}
+    end
+    out.should eq [[0x0a141e, 0x0a141e, -1], [-1, -1, -1]]
+  end
+end
