@@ -75,9 +75,9 @@ describe "PNGGIF.encode_apng" do
     frames[0].delay.should eq 100
     frames[1].delay.should eq 200
 
-    # First frame doubles as the still IDAT, so #bmp is frame 0.
+    # First frame doubles as the still IDAT, so #bmp is frame 0 (decoded once).
     png.bmp[0][0].r.should eq 255
-    frames[0].bmp[0][0].r.should eq 255
+    frames[0].bmp.should be png.bmp
     frames[1].bmp[0][0].g.should eq 255
   end
 

@@ -361,11 +361,18 @@ module PNGGIF
       frames = [] of Frame
       @raw_frames.each do |rf|
         fc = rf[:fctl]
-        @width = fc["width"]
-        @height = fc["height"]
-        idat = inflate(rf[:fdat])
-        next if idat.empty?
-        bmp = decode_image idat
+        if rf[:idat] && fc["width"] == @canvas_width && fc["height"] == @canvas_height
+          # The IDAT frame was already decoded as the still `#bmp` (and the
+          # spec requires it to cover the full canvas), so share it instead of
+          # inflating and unfiltering the same data a second time.
+          bmp = self.bmp
+        else
+          @width = fc["width"]
+          @height = fc["height"]
+          idat = inflate(rf[:fdat])
+          next if idat.empty?
+          bmp = decode_image idat
+        end
         den = fc["delayDen"] == 0 ? 100 : fc["delayDen"]
         # Integer math: delay is delayNum/delayDen seconds, in milliseconds. The
         # old `(delayNum / den * 1000).to_i` did float division then truncated,
