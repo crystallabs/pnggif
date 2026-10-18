@@ -178,23 +178,44 @@ module PNGGIF
       {(v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff}
     end
 
-    # Flattens *bmp* to raw interleaved RGBA bytes (`w*h*4`) — the format
+    # `PNGGIF::Pixel` is four consecutive `UInt8`s in r,g,b,a order —
+    # byte-for-byte the interleaved RGBA layout PNG colour type 6 scanlines,
+    # ffmpeg's `rgba` raw video and `#rgba` use — so a row converts to or from
+    # bytes with one `memcpy`. The three helpers below are the only place
+    # that layout equivalence is relied on.
+
+    # Writes the first *w* pixels of *row* into *dst* as `w * 4` RGBA bytes;
+    # a short row is padded with transparent pixels, extra pixels are dropped.
+    def self.pack_rgba(row : Array(PNGGIF::Pixel), w : Int32, dst : Bytes) : Nil
+      n = Math.min(w, row.size)
+      row.to_unsafe.as(UInt8*).copy_to(dst.to_unsafe, n * 4) if n > 0
+      dst[n * 4, (w - n) * 4].fill(0_u8)
+    end
+
+    # Builds a row of *w* pixels from the leading `w * 4` RGBA bytes of *src*.
+    def self.unpack_rgba(src : Bytes, w : Int32) : Array(PNGGIF::Pixel)
+      bytes = src[0, w * 4]
+      Array(PNGGIF::Pixel).build(w) do |buf|
+        bytes.copy_to(buf.as(UInt8*), bytes.size)
+        w
+      end
+    end
+
+    # Overwrites the first *w* pixels of *row* (which must hold at least *w*)
+    # in place from the leading `w * 4` RGBA bytes of *src*.
+    def self.unpack_rgba(src : Bytes, row : Array(PNGGIF::Pixel), w : Int32) : Nil
+      raise IndexError.new("row of #{row.size} pixels is narrower than #{w}") if row.size < w
+      src[0, w * 4].copy_to(row.to_unsafe.as(UInt8*), w * 4)
+    end
+
+    # Flattens *bmp* to raw interleaved RGBA bytes (`w*h*4`, `w` being the
+    # first row's width; other rows are padded/cropped to it) — the format
     # ffmpeg ingests as `-f rawvideo -pixel_format rgba`, and a common
     # interchange payload generally.
     def self.rgba(bmp : PNGGIF::Bitmap) : Bytes
-      h = bmp.size
-      w = h > 0 ? bmp[0].size : 0
+      w, h = dims(bmp)
       buf = Bytes.new(w * h * 4)
-      i = 0
-      bmp.each do |row|
-        row.each do |px|
-          buf[i] = px.r.to_u8!
-          buf[i + 1] = px.g.to_u8!
-          buf[i + 2] = px.b.to_u8!
-          buf[i + 3] = px.a.to_u8!
-          i += 4
-        end
-      end
+      bmp.each_with_index { |row, y| pack_rgba(row, w, buf + y * w * 4) }
       buf
     end
 

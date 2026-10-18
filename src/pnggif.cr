@@ -590,13 +590,8 @@ module PNGGIF
         end
       when 6 # RGBA
         if eight
-          # `Pixel` is four consecutive `UInt8`s in r,g,b,a order — byte-for-byte
-          # the layout of an 8-bit RGBA scanline — so copy the whole line
-          # straight in (one `memcpy`) instead of constructing pixel-by-pixel.
-          Array(Pixel).build(w) do |pbuf|
-            src.copy_to(pbuf.as(UInt8*), w * 4)
-            w
-          end
+          # An 8-bit RGBA scanline is already the `Pixel` byte layout.
+          Raster.unpack_rgba(line, w)
         else
           Array(Pixel).new(w) do |x|
             b = x * 4

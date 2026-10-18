@@ -160,37 +160,11 @@ module PNGGIF
   private def self.compress_image(bmp : Bitmap, w : Int32, h : Int32) : Bytes
     line = Bytes.new(w * 4 + 1)
     line[0] = 0u8 # filter: None — never overwritten, so set once.
-    dst = line.to_unsafe + 1
+    pixels = line + 1
     mem = IO::Memory.new
     Compress::Zlib::Writer.open(mem) do |zw|
       h.times do |y|
-        row = bmp[y]
-        rn = row.size
-        if rn >= w && sizeof(Pixel) == 4
-          # `Pixel` is four contiguous bytes r,g,b,a — byte-for-byte the PNG
-          # color-type-6 scanline order — so a full-width row's storage can be
-          # copied straight in, skipping per-pixel accessors. The `sizeof` guard
-          # falls back to the scalar path if the struct layout ever changes.
-          # Extra pixels (rn > w) are not copied.
-          dst.copy_from(row.to_unsafe.as(UInt8*), w * 4)
-        else
-          oi = 1
-          x = 0
-          while x < w
-            if x < rn
-              px = row.unsafe_fetch(x)
-              line[oi] = px.r.to_u8!; line[oi + 1] = px.g.to_u8!
-              line[oi + 2] = px.b.to_u8!; line[oi + 3] = px.a.to_u8!
-            else
-              # Buffer is reused across rows, so padding must be re-zeroed or it
-              # retains the previous row's pixels.
-              line[oi] = 0u8; line[oi + 1] = 0u8
-              line[oi + 2] = 0u8; line[oi + 3] = 0u8
-            end
-            oi += 4
-            x += 1
-          end
-        end
+        Raster.pack_rgba bmp[y], w, pixels
         zw.write line
       end
     end
