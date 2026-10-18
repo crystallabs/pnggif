@@ -1059,9 +1059,7 @@ module PNGGIF
           p = parse_image(buf, p)
         when 0x21 # extension
           p = parse_extension(buf, p)
-        when 0x3b # trailer
-          break
-        else
+        else # 0x3b trailer, or garbage
           break
         end
       end
@@ -1244,36 +1242,27 @@ module PNGGIF
         return
       end
 
-      # Interlaced: indices fill rows out of order, so reassemble via a flat
-      # sample buffer first, then pack into rows.
-      interlacing = [{0, 8}, {4, 8}, {2, 4}, {1, 2}, {0, 0}]
-      samples = Array(Pixel).new(w * h, Pixel.new(0, 0, 0, 0))
-      row = 0
-      col = 0
-      ilp = 0
-      indices.each do |b|
-        pos = row * w + col
-        if pos < samples.size
-          samples[pos] = gif_color(table, b, transparent)
-        end
-        col += 1
-        if col >= w
-          col = 0
-          row += interlacing[ilp][1]
-          # Skip every pass whose starting row is already past the image, not
-          # just one. The four Adam7 passes start at rows 0, 4, 2, 1; for a short
-          # image several starts can exceed `h` at once. Advancing only one pass
-          # per overflow left `row` on an out-of-range pass, dropping that pass's
-          # row of indices and scrambling every later row. Loop until `row` lands
-          # inside the image (or passes are exhausted).
-          while row >= h && ilp < interlacing.size - 1
-            ilp += 1
-            row = interlacing[ilp][0]
+      # Interlaced: the index stream carries the rows in four passes (rows
+      # 0,8,16…, then 4,12…, then 2,6,10…, then the odd rows), so walk the
+      # passes and fill `bmp` row by row. Rows the stream never reaches stay
+      # transparent; indices past the last pass are ignored.
+      bmp = Bitmap.new(h) { Array(Pixel).new(w, Pixel.new(0, 0, 0, 0)) }
+      k = 0
+      n = indices.size
+      { {0, 8}, {4, 8}, {2, 4}, {1, 2} }.each do |(start, step)|
+        y = start
+        while y < h && k < n
+          line = bmp[y]
+          x = 0
+          while x < w && k < n
+            line[x] = gif_color(table, indices[k], transparent)
+            x += 1
+            k += 1
           end
+          y += step
         end
       end
-
-      img.bmp = pack_pixel_rows(w, h) { |idx| samples[idx]? || Pixel.new(0, 0, 0, 0) }
+      img.bmp = bmp
     end
 
     # Builds the LZW dictionary in its initial / post-Clear state: `cc` literal
@@ -1302,8 +1291,10 @@ module PNGGIF
     end
 
     # LZW decompression ported from tng.js / ka-cs-programs gif-reader (MIT).
-    # *expected* is the final index count (image `width*height`); presizing the
-    # output array avoids ~log2(N) reallocations + full copies as it fills.
+    # *expected* is the final index count (image `width*height`): the output
+    # array is presized to it (avoiding ~log2(N) reallocations + copies as it
+    # fills) and decoding stops once it is reached, so a stream that keeps
+    # going past the frame can't balloon memory.
     private def lzw_decompress(input : Bytes, code_size : Int32, expected : Int32 = 0) : Array(Int32)
       bit_depth = code_size + 1
       cc = 1 << code_size
@@ -1391,6 +1382,7 @@ module PNGGIF
 
         break if stack.empty?
         buf << stack.pop
+        break if buf.size == expected
       end
 
       buf

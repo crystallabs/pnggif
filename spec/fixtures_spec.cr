@@ -8,7 +8,7 @@ require "./spec_helper"
 FIXTURES = File.join(__DIR__, "fixtures")
 
 def fixture(name : String) : PNGGIF::PNG
-  PNGGIF::PNG.new(File.join(FIXTURES, "#{name}.png"))
+  PNGGIF::PNG.new(File.join(FIXTURES, name.starts_with?("gif") ? "#{name}.gif" : "#{name}.png"))
 end
 
 # The 9×7 pattern the fixtures were generated from.
@@ -66,5 +66,43 @@ describe "PNG fixtures" do
       bmp[0][0].a.should eq 0
       bmp[6][8].a.should eq 255
     end
+  end
+end
+
+describe "GIF fixtures" do
+  it "decodes an interlaced GIF identically to its non-interlaced twin" do
+    {"gif", "gif_short"}.each do |name|
+      plain = fixture(name)
+      inter = fixture("#{name}_i")
+      PNGGIF::GIF.new(File.read(File.join(FIXTURES, "#{name}_i.gif")).to_slice).images.first.interlaced?.should be_true
+      plain.width.should eq 9
+      inter.height.should eq plain.height
+      pixels(inter.bmp).should eq pixels(plain.bmp)
+    end
+    fixture("gif_short").height.should eq 3
+    # gif.gif was written losslessly from the 60-colour pal8.png.
+    pixels(fixture("gif").bmp).should eq pixels(fixture("pal8").bmp)
+  end
+
+  it "decodes a multi-frame GIF with sub-rectangle frames and disposal" do
+    png = fixture("gif_anim")
+    png.num_plays.should eq 2 # ImageMagick stores `-loop 3` as 2 repeats
+    frames = png.frames.should_not be_nil
+    frames.size.should eq 2
+    frames[0].delay.should eq 100
+    frames[0].dispose_op.should eq 1 # GIF "restore to background"
+    frames[1].x_offset.should eq 3
+    frames[1].y_offset.should eq 2
+    frames[1].width.should eq 4
+    frames[1].height.should eq 3
+    frames[1].bmp.size.should eq 3
+
+    cellmaps = png.animation_cellmaps(9, 7).should_not be_nil
+    cellmaps.size.should eq 2
+    second = cellmaps[1][0]
+    second[0][0].a.should eq 0   # cleared by frame 0's disposal
+    second[2][3].a.should eq 255 # covered by frame 1
+    second[4][6].a.should eq 255
+    second[5][3].a.should eq 0
   end
 end
