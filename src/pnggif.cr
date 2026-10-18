@@ -700,13 +700,13 @@ module PNGGIF
         # Both fixed: honour them exactly.
       elsif cmwidth
         scale = cmwidth / width
-        cmheight = (height * scale / cell_aspect).round.to_i
+        cmheight = cells(height * scale / cell_aspect)
       elsif cmheight
         scale = cmheight / height
-        cmwidth = (width * scale * cell_aspect).round.to_i
+        cmwidth = cells(width * scale * cell_aspect)
       else
-        cmwidth = (width * scale).round.to_i
-        cmheight = (height * scale / cell_aspect).round.to_i
+        cmwidth = cells(width * scale)
+        cmheight = cells(height * scale / cell_aspect)
       end
       return Bitmap.new if cmwidth <= 0 || cmheight <= 0
 
@@ -732,6 +732,13 @@ module PNGGIF
           row[sample_index(cx, xs, width)]? || Pixel.new(0, 0, 0, 0)
         end
       end
+    end
+
+    # Rounds a derived cell count, never below 1 for a positive extent: a thin
+    # image (say 3×1 at `cell_aspect` 2) must not vanish into an empty cellmap
+    # because its row count rounds to 0.
+    private def cells(extent : Float64) : Int32
+      extent > 0 ? Math.max(1, extent.round.to_i) : 0
     end
 
     # The source index an output cell *i* samples, *step* source pixels to a

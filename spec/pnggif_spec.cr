@@ -101,6 +101,14 @@ describe PNGGIF::PNG do
       png.cellmap[0].size.should eq 8
     end
 
+    it "never rounds a derived dimension down to zero" do
+      png = PNGGIF::PNG.new(PNGGIF.encode_png(solid_bitmap(3, 1, 1, 2, 3)))
+      png.cellmap.size.should eq 1
+      png.cellmap[0].size.should eq 3
+      png.create_cellmap(png.bmp, 1, nil).size.should eq 1
+      png.create_cellmap(png.bmp, nil, nil, 0.1).should eq [[PNGGIF::Pixel.new(1, 2, 3)]]
+    end
+
     it "honours an explicit cell width/height verbatim" do
       png = PNGGIF::PNG.new(PNGGIF.encode_png(solid_bitmap(8, 8, 0, 0, 0)),
         cell_width: 4, cell_height: 4)
