@@ -42,6 +42,21 @@ describe "PNGGIF.encode_png" do
   it "rejects an empty bitmap" do
     expect_raises(ArgumentError) { PNGGIF.encode_png(PNGGIF::Bitmap.new) }
   end
+
+  it "writes a valid CRC on every chunk, including the empty IEND" do
+    bytes = PNGGIF.encode_png(solid_bitmap(1, 1, 0, 0, 0))
+    types = [] of String
+    i = 8
+    while i + 12 <= bytes.size
+      len = IO::ByteFormat::BigEndian.decode(UInt32, bytes[i, 4]).to_i
+      type_and_data = bytes[i + 4, 4 + len]
+      stored = IO::ByteFormat::BigEndian.decode(UInt32, bytes[i + 8 + len, 4])
+      stored.should eq Digest::CRC32.checksum(type_and_data)
+      types << String.new(bytes[i + 4, 4])
+      i += 12 + len
+    end
+    types.should eq ["IHDR", "IDAT", "IEND"]
+  end
 end
 
 describe "PNGGIF.encode_apng" do

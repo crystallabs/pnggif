@@ -212,7 +212,10 @@ module PNGGIF
     io.write type_bytes
     io.write data
     crc = Digest::CRC32.update(type_bytes, Digest::CRC32.initial)
-    crc = Digest::CRC32.update(data, crc)
+    # zlib's `crc32()` returns 0 for a NULL buffer rather than the running
+    # value, and `Bytes.empty` has a NULL pointer, so updating with an empty
+    # payload (IEND) would reset the CRC to 0 and write an invalid chunk.
+    crc = Digest::CRC32.update(data, crc) unless data.empty?
     write_u32 io, crc
   end
 
