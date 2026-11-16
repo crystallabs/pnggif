@@ -15,7 +15,7 @@ require "./video_source"
 # LZW decoder. JPEG and other formats are converted to PNG via ImageMagick
 # (`magick` or `convert`) if it is available.
 module PNGGIF
-  VERSION = "0.1.3"
+  VERSION = "0.2.0"
 
   # Default cap on the pixels (`width * height`) a decoder accepts for the
   # canvas and for each frame: 2^27 (~134 megapixels, e.g. 16384x8192). That

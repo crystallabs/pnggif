@@ -28,7 +28,7 @@ end
 
 private def b20_zlib(raw : Bytes) : Bytes
   io = IO::Memory.new
-  Compress::Zlib::Writer.open(io) { |z| z.write raw }
+  Compress::Zlib::Writer.open(io, &.write(raw))
   io.to_slice
 end
 
