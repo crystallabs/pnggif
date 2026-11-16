@@ -17,6 +17,21 @@ require "./video_source"
 module PNGGIF
   VERSION = "0.1.3"
 
+  # Default cap on the pixels (`width * height`) a decoder accepts for the
+  # canvas and for each frame: 2^27 (~134 megapixels, e.g. 16384x8192). That
+  # is above the largest camera sensors and bounds one decoded `Bitmap` at
+  # 512 MiB, so no realistic image reaches it while a few header bytes can't
+  # claim an arbitrarily large allocation.
+  DEFAULT_MAX_PIXELS = 1_i64 << 27
+
+  # Raises when a *width* x *height* image exceeds *max_pixels*. *what* names
+  # the format and part for the message (e.g. `"png"`, `"gif image"`).
+  def self.check_pixels(width : Int, height : Int, max_pixels : Int, what : String) : Nil
+    if width.to_i64 * height.to_i64 > max_pixels
+      raise "bad #{what}: dimensions #{width}x#{height} exceed the #{max_pixels}-pixel limit"
+    end
+  end
+
   # A single RGBA pixel. Channels are 0..255; `a` is opacity (255 = opaque).
   #
   # Channels are stored as `UInt8` (4 bytes/pixel instead of 4×`Int32` = 16) so
@@ -123,9 +138,9 @@ module PNGGIF
     @interlace = 0
     @palette = [] of Pixel
     # Color-key transparency from a `tRNS` chunk on a grayscale (type 0) or
-    # truecolor (type 2) image: the (scaled, 8-bit) RGB whose pixels are
-    # transparent. `nil` when absent; palette transparency (type 3) is folded
-    # into `@palette` instead.
+    # truecolor (type 2) image: the raw (unscaled, image bit depth) samples
+    # whose pixels are transparent, gray repeated for type 0. `nil` when
+    # absent; palette transparency (type 3) is folded into `@palette` instead.
     @trns : Tuple(Int32, Int32, Int32)? = nil
     @sample_depth = 1
     @bits_per_pixel = 8
@@ -134,6 +149,10 @@ module PNGGIF
     @idat = [] of Bytes
     @raw_frames = [] of NamedTuple(fctl: Hash(String, Int32), fdat: Array(Bytes), idat: Bool)
     @actl : Hash(String, Int32)? = nil
+
+    # Most pixels (`width * height`) accepted for the canvas and for each
+    # frame; a file declaring more raises before anything is allocated.
+    getter max_pixels : Int64 = DEFAULT_MAX_PIXELS
 
     # Rendering knobs forwarded from the consumer.
     property scale : Float64
@@ -150,13 +169,16 @@ module PNGGIF
     # constrain the cellmap to a terminal box; `scale` is used when neither is
     # given. `cell_aspect` corrects for non-square cells (see `#cell_aspect`).
     # `ascii` renders glyphs by luminance; `speed` scales frame delays.
+    # `max_pixels` caps the declared image size (see `#max_pixels`).
     def initialize(file : String | Bytes,
                    @scale : Float64 = 1.0,
                    @cell_width : Int32? = nil,
                    @cell_height : Int32? = nil,
                    @ascii : Bool = false,
                    @speed : Float64 = 1.0,
-                   @cell_aspect : Float64 = 2.0)
+                   @cell_aspect : Float64 = 2.0,
+                   max_pixels : Int = DEFAULT_MAX_PIXELS)
+      @max_pixels = max_pixels.to_i64
       buf = file.is_a?(String) ? File.read(file).to_slice : file
 
       case detect_format(buf)
@@ -215,7 +237,7 @@ module PNGGIF
       raise "bad png header" unless buf.size >= 8 && u32(buf, 0) == 0x89504e47 && u32(buf, 4) == 0x0d0a1a0a
 
       parse_chunks buf
-      idat = inflate(@idat)
+      idat = inflate(@idat, raw_data_size)
       raise "no image data" if idat.empty?
 
       # Parse the default image (IDAT) at the IHDR dimensions first; this is the
@@ -261,6 +283,7 @@ module PNGGIF
           w = u32(data, 0)
           h = u32(data, 4)
           raise "bad png: invalid dimensions #{w}x#{h}" if w > Int32::MAX.to_u32 || h > Int32::MAX.to_u32
+          PNGGIF.check_pixels w, h, @max_pixels, "png"
           @width = w.to_i
           @height = h.to_i
           @bit_depth = data[8].to_i
@@ -297,15 +320,13 @@ module PNGGIF
           when 0
             # Grayscale color key: single 2-byte gray sample.
             if data.size >= 2
-              g = sample_to_8bit(u16(data, 0).to_i)
+              g = u16(data, 0).to_i
               @trns = {g, g, g}
             end
           when 2
             # Truecolor color key: three 2-byte R/G/B samples.
             if data.size >= 6
-              @trns = {sample_to_8bit(u16(data, 0).to_i),
-                       sample_to_8bit(u16(data, 2).to_i),
-                       sample_to_8bit(u16(data, 4).to_i)}
+              @trns = {u16(data, 0).to_i, u16(data, 2).to_i, u16(data, 4).to_i}
             end
           end
         when "IDAT"
@@ -342,12 +363,14 @@ module PNGGIF
       end
     end
 
+    # A field with bit 31 set wraps negative (`to_i!`) rather than raising;
+    # `frame_fits_canvas?` then rejects the frame.
     private def parse_fctl(data : Bytes) : Hash(String, Int32)
       {
-        "width"     => u32(data, 4).to_i,
-        "height"    => u32(data, 8).to_i,
-        "xOffset"   => u32(data, 12).to_i,
-        "yOffset"   => u32(data, 16).to_i,
+        "width"     => u32(data, 4).to_i!,
+        "height"    => u32(data, 8).to_i!,
+        "xOffset"   => u32(data, 12).to_i!,
+        "yOffset"   => u32(data, 16).to_i!,
         "delayNum"  => u16(data, 20).to_i,
         "delayDen"  => u16(data, 22).to_i,
         "disposeOp" => data[24].to_i,
@@ -361,6 +384,7 @@ module PNGGIF
       frames = [] of Frame
       @raw_frames.each do |rf|
         fc = rf[:fctl]
+        next unless frame_fits_canvas?(fc)
         if rf[:idat] && fc["width"] == @canvas_width && fc["height"] == @canvas_height
           # The IDAT frame was already decoded as the still `#bmp` (and the
           # spec requires it to cover the full canvas), so share it instead of
@@ -369,7 +393,7 @@ module PNGGIF
         else
           @width = fc["width"]
           @height = fc["height"]
-          idat = inflate(rf[:fdat])
+          idat = inflate(rf[:fdat], raw_data_size)
           next if idat.empty?
           bmp = decode_image idat
         end
@@ -383,6 +407,18 @@ module PNGGIF
           fc["xOffset"], fc["yOffset"], fc["disposeOp"], fc["blendOp"])
       end
       frames.empty? ? nil : frames
+    end
+
+    # Whether an `fcTL` region is non-empty and lies within the canvas, as
+    # the APNG spec requires. A frame is decoded at its own declared size, so
+    # an unchecked one lets a few bytes of input claim a huge allocation.
+    private def frame_fits_canvas?(fc : Hash(String, Int32)) : Bool
+      w = fc["width"]
+      h = fc["height"]
+      x = fc["xOffset"]
+      y = fc["yOffset"]
+      w > 0 && h > 0 && x >= 0 && y >= 0 &&
+        x.to_i64 + w <= @canvas_width && y.to_i64 + h <= @canvas_height
     end
 
     # --------------------------------------------------------------- scanlines
@@ -435,6 +471,29 @@ module PNGGIF
     # Adam7 interlace passes as `{xstart, ystart, xstep, ystep}`.
     ADAM7 = { {0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0, 2, 2, 4}, {1, 0, 2, 2}, {0, 1, 1, 2} }
 
+    # Most inflated bytes one image may need; `IO::Memory` can't grow past it.
+    MAX_RAW_BYTES = 1_i64 << 30
+
+    # Inflated bytes a `@width` x `@height` image occupies at the IHDR format:
+    # a filter byte plus the packed samples per scanline (per Adam7 pass line
+    # when interlaced). Anything a stream carries past this is never decoded.
+    private def raw_data_size : Int64
+      compute_metrics
+      total = 0_i64
+      if @interlace == 1
+        ADAM7.each do |(xstart, ystart, xstep, ystep)|
+          next if xstart >= @width || ystart >= @height
+          ppr = (@width - xstart + xstep - 1) // xstep
+          lines = (@height - ystart + ystep - 1) // ystep
+          total += lines.to_i64 * (1_i64 + row_bytes(ppr))
+        end
+      else
+        total = @height.to_i64 * (1_i64 + @byte_width)
+      end
+      raise "bad png: image data too large" if total > MAX_RAW_BYTES
+      total
+    end
+
     # Decodes the IDAT/fdAT byte stream straight into a `Bitmap` of exactly
     # `@height` rows × `@width` pixels. Each unfiltered scanline converts
     # directly into `Pixel`s via `build_pixel_row` (no full-image samples
@@ -443,7 +502,8 @@ module PNGGIF
     private def decode_image(data : Bytes) : Bitmap
       compute_metrics
       bmp = @interlace == 1 ? decode_interlaced(data) : decode_progressive(data)
-      apply_color_trns bmp if @trns
+      # Other depths match the key on raw samples in `build_pixel_row`.
+      apply_color_trns bmp if @trns && @bit_depth == 8
       bmp
     end
 
@@ -497,9 +557,10 @@ module PNGGIF
       rows
     end
 
-    # Applies grayscale/truecolor `tRNS` color-key transparency: every pixel
-    # whose (8-bit) RGB equals the keyed color has its alpha cleared to 0. Runs
-    # only when `@trns` is set (rare).
+    # Applies grayscale/truecolor `tRNS` color-key transparency to an 8-bit
+    # image, where a raw sample is its 8-bit value: every pixel whose RGB
+    # equals the keyed color has its alpha cleared to 0. Runs only when
+    # `@trns` is set (rare).
     private def apply_color_trns(bmp : Bitmap)
       t = @trns
       return unless t
@@ -535,10 +596,13 @@ module PNGGIF
     # Converts one unfiltered scanline of *w* pixels into a row of `Pixel`s.
     # Colour type and bit depth are constant for the image, so the common
     # 8-bit case gets a tight branch reading bytes straight out of `line`;
-    # other depths fall back to `raw_sample` + `sample_to_8bit`. Palette
+    # other depths fall back to `raw_sample` + `sample_to_8bit` and apply the
+    # `tRNS` color key on the raw samples (scaling 16-bit samples down to 8
+    # bits would also key every sample sharing the key's high byte). Palette
     # indices (type 3) are used raw.
     private def build_pixel_row(line : Bytes, w : Int32) : Array(Pixel)
       eight = @bit_depth == 8
+      key = @trns
       # `line` is exactly `row_bytes(w)` bytes, so every 8-bit indexed read below
       # stays in bounds and can skip the per-byte bounds check via the raw pointer.
       src = line.to_unsafe
@@ -552,8 +616,9 @@ module PNGGIF
           end
         else
           Array(Pixel).new(w) do |x|
-            v = sample_to_8bit(raw_sample(line, x))
-            Pixel.new(v, v, v, 255)
+            raw = raw_sample(line, x)
+            v = sample_to_8bit(raw)
+            Pixel.new(v, v, v, (key && raw == key[0]) ? 0 : 255)
           end
         end
       when 2 # RGB
@@ -565,7 +630,11 @@ module PNGGIF
         else
           Array(Pixel).new(w) do |x|
             b = x * 3
-            Pixel.new(sample_to_8bit(raw_sample(line, b)), sample_to_8bit(raw_sample(line, b + 1)), sample_to_8bit(raw_sample(line, b + 2)), 255)
+            rr = raw_sample(line, b)
+            rg = raw_sample(line, b + 1)
+            rb = raw_sample(line, b + 2)
+            a = (key && rr == key[0] && rg == key[1] && rb == key[2]) ? 0 : 255
+            Pixel.new(sample_to_8bit(rr), sample_to_8bit(rg), sample_to_8bit(rb), a)
           end
         end
       when 3 # palette index (raw sample, never scaled)
@@ -891,7 +960,7 @@ module PNGGIF
     # ------------------------------------------------------------------ GIF
 
     private def decode_gif(buf : Bytes)
-      gif = GIF.new buf
+      gif = GIF.new buf, @max_pixels
       @width = gif.width
       @height = gif.height
       @canvas_width = gif.width
@@ -948,13 +1017,14 @@ module PNGGIF
 
     # ------------------------------------------------------------- decompress
 
-    private def inflate(buffers : Array(Bytes)) : Bytes
+    # Inflates the concatenated *buffers*, reading at most *limit* bytes of
+    # output so a stream expanding past what the image needs is cut off.
+    private def inflate(buffers : Array(Bytes), limit : Int64) : Bytes
       return Bytes.empty if buffers.empty?
       # Single chunk (small PNGs, per-frame fdAT): `IO::Memory` wraps the slice
       # without copying, so skip allocating + filling the `combined` buffer.
       if buffers.size == 1
-        io = IO::Memory.new(buffers[0])
-        return Compress::Zlib::Reader.open(io, &.getb_to_end)
+        return inflate_bounded(IO::Memory.new(buffers[0]), limit)
       end
       total = buffers.sum(&.size)
       combined = Bytes.new(total)
@@ -963,8 +1033,14 @@ module PNGGIF
         b.copy_to(combined + off)
         off += b.size
       end
-      io = IO::Memory.new combined
-      Compress::Zlib::Reader.open(io, &.getb_to_end)
+      inflate_bounded(IO::Memory.new(combined), limit)
+    end
+
+    private def inflate_bounded(io : IO, limit : Int64) : Bytes
+      mem = IO::Memory.new
+      # At least one byte, so a present stream never reads back as empty.
+      Compress::Zlib::Reader.open(io) { |z| IO.copy z, mem, Math.max(limit, 1_i64) }
+      mem.to_slice
     end
 
     # ------------------------------------------------------------- byte utils
@@ -1009,7 +1085,13 @@ module PNGGIF
     @gc_dispose = 0
     @gc_transparent = -1
 
-    def initialize(buf : Bytes)
+    # Most pixels accepted for the logical screen and for each image.
+    getter max_pixels : Int64
+
+    # Decodes *buf*. A logical screen or image declaring more than
+    # *max_pixels* pixels raises before anything is allocated.
+    def initialize(buf : Bytes, max_pixels : Int = DEFAULT_MAX_PIXELS)
+      @max_pixels = max_pixels.to_i64
       # The 6-byte signature + 7-byte logical screen descriptor must be present
       # before any of them is read; guard up front so a truncated buffer raises
       # a clean error instead of an IndexError.
@@ -1019,6 +1101,7 @@ module PNGGIF
 
       @width = u16(buf, 6).to_i
       @height = u16(buf, 8).to_i
+      PNGGIF.check_pixels @width, @height, @max_pixels, "gif"
       flags = buf[10].to_i
       gct = (flags & 0x80) != 0
       gctsize = (flags & 0x07) + 1
@@ -1161,6 +1244,7 @@ module PNGGIF
       # can overflow Int32 for a frame with width*height > Int32::MAX (~46341²).
       # Reject it up front via an Int64 product for a clean decode error.
       raise "bad gif image: dimensions #{img.width}x#{img.height} too large" if img.width.to_i64 * img.height.to_i64 > Int32::MAX
+      PNGGIF.check_pixels img.width, img.height, @max_pixels, "gif image"
       flags = buf[p].to_i; p += 1
       lct = (flags & 0x80) != 0
       img.interlaced = (flags & 0x40) != 0
@@ -1292,7 +1376,7 @@ module PNGGIF
 
     # LZW decompression ported from tng.js / ka-cs-programs gif-reader (MIT).
     # *expected* is the final index count (image `width*height`): the output
-    # array is presized to it (avoiding ~log2(N) reallocations + copies as it
+    # array is presized toward it (avoiding most reallocations + copies as it
     # fills) and decoding stops once it is reached, so a stream that keeps
     # going past the frame can't balloon memory.
     private def lzw_decompress(input : Bytes, code_size : Int32, expected : Int32 = 0) : Array(Int32)
@@ -1311,7 +1395,9 @@ module PNGGIF
       buffer = 0
       nbuffer = 0
       p = 0
-      buf = expected > 0 ? Array(Int32).new(expected) : [] of Int32
+      # Presized from the input as well as *expected*, so a few bytes of data
+      # declaring a huge frame reserve little; the array grows if it must.
+      buf = expected > 0 ? Array(Int32).new(Math.min(expected.to_i64, input.size.to_i64 * 8 + 256).to_i) : [] of Int32
       max_elem = 1 << bit_depth
 
       loop do
